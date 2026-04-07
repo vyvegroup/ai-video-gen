@@ -60,6 +60,15 @@
     startTime: null,
     deleteCallback: null,
     galleryItems: [],
+    // Chat state
+    chatSessionId: null,
+    chatMessages: [],
+    chatOpen: false,
+    chatSending: false,
+    chatCharacter: { name: 'AI Assistant', age: null, personality: '', appearance: '', scenario: '', nsfw: false },
+    chatUnreadCount: 0,
+    // Persistent generation state
+    activeGenerations: {},
   };
 
   // ============================
@@ -1195,10 +1204,12 @@
   // ============================
   function initKeyboardShortcuts() {
     document.addEventListener('keydown', (e) => {
-      // Escape closes modals
+      // Escape closes modals and chat
       if (e.key === 'Escape') {
         $('#settingsModal').classList.add('hidden');
         $('#deleteModal').classList.add('hidden');
+        $('#charSettingsModal').classList.add('hidden');
+        if (state.chatOpen) chatTogglePanel();
       }
       // Ctrl/Cmd+Enter to generate
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && state.currentTab === 'create') {
@@ -1217,6 +1228,327 @@
       return true;
     } catch {
       return false;
+    }
+  }
+
+  // ============================
+  // AI CHAT — Session, Messaging, Character
+  // ============================
+  function formatChatTimestamp(isoStr) {
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return sameDay ? `${hh}:${mm}` : `${d.getMonth()+1}/${d.getDate()} ${hh}:${mm}`;
+  }
+
+  function chatScrollToBottom() {
+    const container = $('#chatMessages');
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+
+  function chatRenderMessages() {
+    const container = $('#chatMessages');
+    const emptyEl = $('#chatEmpty');
+    if (!container) return;
+
+    if (state.chatMessages.length === 0) {
+      emptyEl.classList.remove('hidden');
+      return;
+    }
+    emptyEl.classList.add('hidden');
+
+    container.innerHTML = '';
+    state.chatMessages.forEach(msg => {
+      const isUser = msg.role === 'user';
+      const div = el('div', { className: `chat-msg ${isUser ? 'chat-msg-user' : 'chat-msg-ai'}` });
+      div.innerHTML = `
+        <div class="chat-msg-bubble">${escapeHtml(msg.content)}</div>
+        <div class="chat-msg-time">${formatChatTimestamp(msg.created_at || msg.timestamp)}</div>
+      `;
+      container.appendChild(div);
+    });
+
+    chatScrollToBottom();
+  }
+
+  function chatUpdateBadge() {
+    const badge = $('#chatBadge');
+    if (!badge) return;
+    if (state.chatUnreadCount > 0 && !state.chatOpen) {
+      badge.textContent = state.chatUnreadCount > 99 ? '99+' : state.chatUnreadCount;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
+  function chatSetTyping(show) {
+    const el = $('#chatTyping');
+    if (el) el.classList.toggle('hidden', !show);
+    if (show) chatScrollToBottom();
+  }
+
+  async function chatCreateSession() {
+    try {
+      const result = await apiFetch('/api/chat/session', { method: 'POST' });
+      state.chatSessionId = result.session_id || result.id;
+      return state.chatSessionId;
+    } catch (err) {
+      console.warn('Failed to create chat session:', err);
+      showToast('error', 'Chat error', 'Could not create chat session');
+      return null;
+    }
+  }
+
+  async function chatLoadSession(sessionId) {
+    try {
+      const result = await apiFetch(`/api/chat/session/${encodeURIComponent(sessionId)}`);
+      state.chatSessionId = sessionId;
+      state.chatMessages = result.messages || [];
+
+      if (result.character) {
+        state.chatCharacter = { ...state.chatCharacter, ...result.character };
+        chatUpdateCharacterUI();
+      }
+
+      chatRenderMessages();
+    } catch (err) {
+      console.warn('Failed to load chat session:', err);
+    }
+  }
+
+  async function chatSendMessage(text) {
+    if (!text.trim() || state.chatSending) return;
+
+    const trimmed = text.trim();
+
+    // Ensure session exists
+    if (!state.chatSessionId) {
+      const sid = await chatCreateSession();
+      if (!sid) return;
+      localStorage.setItem('chatSessionId', state.chatSessionId);
+    }
+
+    state.chatSending = true;
+    $('#chatSendBtn').disabled = true;
+    $('#chatInput').value = '';
+
+    // Optimistically add user message
+    const userMsg = { role: 'user', content: trimmed, created_at: new Date().toISOString() };
+    state.chatMessages.push(userMsg);
+    chatRenderMessages();
+    chatSetTyping(true);
+
+    try {
+      const result = await apiFetch('/api/chat/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: trimmed, session_id: state.chatSessionId }),
+      });
+
+      chatSetTyping(false);
+
+      const aiMsg = {
+        role: 'assistant',
+        content: result.response || result.message || result.content || '(No response)',
+        created_at: result.created_at || new Date().toISOString(),
+      };
+      state.chatMessages.push(aiMsg);
+      chatRenderMessages();
+
+      // Update unread if panel is closed
+      if (!state.chatOpen) {
+        state.chatUnreadCount++;
+        chatUpdateBadge();
+      }
+
+    } catch (err) {
+      chatSetTyping(false);
+      showToast('error', 'Chat error', err.message);
+    } finally {
+      state.chatSending = false;
+      $('#chatSendBtn').disabled = false;
+    }
+  }
+
+  async function chatUpdateCharacter() {
+    if (!state.chatSessionId) return;
+    try {
+      const char = { ...state.chatCharacter };
+      await apiFetch(`/api/chat/session/${encodeURIComponent(state.chatSessionId)}/character`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(char),
+      });
+      showToast('success', 'Character saved', `${char.name || 'AI Assistant'} updated`);
+    } catch (err) {
+      showToast('error', 'Save failed', err.message);
+    }
+  }
+
+  function chatUpdateCharacterUI() {
+    const nameEl = $('#chatCharName');
+    if (nameEl) nameEl.textContent = state.chatCharacter.name || 'AI Assistant';
+  }
+
+  function chatPopulateCharSettings() {
+    const c = state.chatCharacter;
+    const nameInput = $('#charNameInput');
+    const ageInput = $('#charAgeInput');
+    const persInput = $('#charPersonalityInput');
+    const appInput = $('#charAppearanceInput');
+    const scenInput = $('#charScenarioInput');
+    const nsfwInput = $('#charNsfwToggle');
+    if (nameInput) nameInput.value = c.name || '';
+    if (ageInput) ageInput.value = c.age || '';
+    if (persInput) persInput.value = c.personality || '';
+    if (appInput) appInput.value = c.appearance || '';
+    if (scenInput) scenInput.value = c.scenario || '';
+    if (nsfwInput) nsfwInput.checked = !!c.nsfw;
+  }
+
+  function chatReadCharSettings() {
+    return {
+      name: ($('#charNameInput') || {}).value || 'AI Assistant',
+      age: parseInt(($('#charAgeInput') || {}).value, 10) || null,
+      personality: ($('#charPersonalityInput') || {}).value || '',
+      appearance: ($('#charAppearanceInput') || {}).value || '',
+      scenario: ($('#charScenarioInput') || {}).value || '',
+      nsfw: (($('#charNsfwToggle') || {}).checked) || false,
+    };
+  }
+
+  function chatTogglePanel() {
+    state.chatOpen = !state.chatOpen;
+    const panel = $('#chatPanel');
+    const toggle = $('#chatToggle');
+    if (panel) panel.classList.toggle('hidden', !state.chatOpen);
+    if (toggle) toggle.classList.toggle('active', state.chatOpen);
+
+    if (state.chatOpen) {
+      state.chatUnreadCount = 0;
+      chatUpdateBadge();
+      setTimeout(() => { if (state.chatOpen) $('#chatInput').focus(); }, 100);
+    }
+  }
+
+  function initChat() {
+    // Toggle panel
+    $('#chatToggle').addEventListener('click', chatTogglePanel);
+
+    // Close button
+    $('#chatCloseBtn').addEventListener('click', () => {
+      if (state.chatOpen) chatTogglePanel();
+    });
+
+    // Send message
+    $('#chatSendBtn').addEventListener('click', () => {
+      const input = $('#chatInput');
+      if (input && input.value.trim()) chatSendMessage(input.value);
+    });
+
+    // Enter to send
+    const chatInput = $('#chatInput');
+    if (chatInput) {
+      chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          if (chatInput.value.trim()) chatSendMessage(chatInput.value);
+        }
+      });
+    }
+
+    // Character settings open
+    $('#chatSettingsBtn').addEventListener('click', () => {
+      chatPopulateCharSettings();
+      $('#charSettingsModal').classList.remove('hidden');
+    });
+
+    // Character settings close
+    $('#charSettingsClose').addEventListener('click', () => {
+      $('#charSettingsModal').classList.add('hidden');
+    });
+
+    $('#charSettingsCancelBtn').addEventListener('click', () => {
+      $('#charSettingsModal').classList.add('hidden');
+    });
+
+    $('#charSettingsModal').addEventListener('click', (e) => {
+    if (e.target === $('#charSettingsModal')) $('#charSettingsModal').classList.add('hidden');
+    });
+
+    // Character settings save
+    $('#charSettingsSaveBtn').addEventListener('click', () => {
+      state.chatCharacter = chatReadCharSettings();
+      chatUpdateCharacterUI();
+      chatUpdateCharacter();
+      $('#charSettingsModal').classList.add('hidden');
+    });
+
+    // Try to restore session from localStorage
+    const savedSession = localStorage.getItem('chatSessionId');
+    if (savedSession) {
+      chatLoadSession(savedSession);
+    }
+
+    chatUpdateBadge();
+  }
+
+  // ============================
+  // PERSISTENT GENERATION STATE
+  // ============================
+  async function restoreGenerations() {
+    try {
+      const result = await apiFetch('/api/generations');
+      const gens = Array.isArray(result) ? result : (result.generations || []);
+
+      if (gens.length === 0) return;
+
+      let hasActive = false;
+
+      gens.forEach(gen => {
+        const id = gen.video_id || gen.id || gen.task_id;
+        if (!id) return;
+
+        const status = gen.status || 'completed';
+
+        if (status === 'processing' || status === 'generating' || status === 'pending' || status === 'queued') {
+          // Active generation — reconnect WebSocket + polling
+          hasActive = true;
+          state.activeGenerations[id] = gen;
+
+          // If this is the generation the user was watching, show progress
+          if (!state.generating) {
+            state.generating = true;
+            state.currentVideoId = id;
+            $('#generateBtn').disabled = true;
+            $('#progressPanel').classList.remove('hidden');
+            updateProgress(gen.progress || 0, gen.step || gen.current_step || 'Resuming...');
+            state.startTime = gen.started_at ? new Date(gen.started_at).getTime() : Date.now();
+            state.elapsedInterval = setInterval(updateElapsedTime, 1000);
+
+            connectWebSocket(id);
+            startPolling(id);
+          }
+        }
+      });
+
+      if (hasActive) {
+        showToast('info', 'Active generations', 'Resuming in-progress generations...');
+      }
+
+      // Make sure completed ones show in gallery
+      const completedGens = gens.filter(g => (g.status === 'completed') && (g.video_id || g.id));
+      if (completedGens.length > 0 && state.currentTab === 'gallery') {
+        loadGallery();
+      }
+
+    } catch (err) {
+      // Silently fail — generations endpoint may not exist yet
+      console.warn('Could not restore generations:', err.message);
     }
   }
 
@@ -1258,6 +1590,12 @@
     // Load initial data
     fetchSystemInfo();
     loadModels();
+
+    // Init chat
+    initChat();
+
+    // Restore persistent generation state
+    restoreGenerations();
   }
 
   // Start the app
