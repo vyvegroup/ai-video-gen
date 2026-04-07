@@ -471,6 +471,7 @@ async def system_info():
     info["allow_nsfw"] = ALLOW_NSFW
     info["active_generations"] = len(state_manager.get_active_generations())
     info["total_generations"] = len(state_manager.list_generations())
+    info["chat_model"] = "Qwen2.5-0.5B-Instruct (local)"
     return info
 
 
@@ -508,10 +509,17 @@ async def startup_event():
     # Configure video uploader if GitHub token is available
     gh_token = os.getenv("GITHUB_TOKEN", "")
     if gh_token:
-        video_uploader.configure(github_token)
+        video_uploader.configure(gh_token)
         logger.info("  Video auto-upload to GitHub: configured")
     else:
         logger.info("  Video auto-upload: not configured (set GITHUB_TOKEN env)")
+
+    # Chat model info
+    chat_model_path = MODELS_DIR / "chat-model"
+    if chat_model_path.exists():
+        logger.info("  Chat model: Qwen2.5-0.5B-Instruct (local, ready)")
+    else:
+        logger.info("  Chat model: will download on first use")
 
     logger.info("=" * 60)
 

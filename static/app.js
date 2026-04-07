@@ -1526,8 +1526,9 @@
             state.currentVideoId = id;
             $('#generateBtn').disabled = true;
             $('#progressPanel').classList.remove('hidden');
-            updateProgress(gen.progress || 0, gen.step || gen.current_step || 'Resuming...');
-            state.startTime = gen.started_at ? new Date(gen.started_at).getTime() : Date.now();
+            const statusMsg = gen.message || gen.step || gen.current_step || 'Generating...';
+            updateProgress(gen.progress || 0, statusMsg);
+            state.startTime = gen.started_at ? new Date(gen.started_at).getTime() : (gen.created_at ? new Date(gen.created_at * 1000).getTime() : Date.now());
             state.elapsedInterval = setInterval(updateElapsedTime, 1000);
 
             connectWebSocket(id);
@@ -1537,7 +1538,7 @@
       });
 
       if (hasActive) {
-        showToast('info', 'Active generations', 'Resuming in-progress generations...');
+        showToast('info', 'Active generations', 'Found in-progress generations');
       }
 
       // Make sure completed ones show in gallery

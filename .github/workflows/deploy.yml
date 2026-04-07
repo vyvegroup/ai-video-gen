@@ -83,6 +83,44 @@ jobs:
           pip install -r requirements-cpu.txt
           echo "Done: $(pip list | grep -cE 'torch|diffusers|fastapi') packages"
 
+      # ---- Chat model cache ----
+      - name: 💬 Cache chat model
+        uses: actions/cache@v4
+        id: chat-model-cache
+        with:
+          path: models/chat-model/
+          key: chat-qwen-0.5b-instruct-v1
+
+      # ---- Download chat model ----
+      - name: 💬 Download chat model (Qwen2.5-0.5B-Instruct)
+        if: steps.chat-model-cache.outputs.cache-hit != 'true'
+        env:
+          HF_HOME: /tmp/hf_cache
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: |
+          echo "Downloading Qwen2.5-0.5B-Instruct for AI chat..."
+          python -c "
+          from huggingface_hub import snapshot_download
+          import os
+          os.makedirs('models/chat-model', exist_ok=True)
+          snapshot_download(
+              'Qwen/Qwen2.5-0.5B-Instruct',
+              local_dir='models/chat-model',
+              local_dir_use_symlinks=False,
+          )
+          print('Chat model downloaded!')
+          print('Size:')
+          import subprocess
+          subprocess.run(['du', '-sh', 'models/chat-model'])
+          "
+
+      # ---- Chat model from cache ----
+      - name: ✅ Chat model from cache
+        if: steps.chat-model-cache.outputs.cache-hit == 'true'
+        run: |
+          echo "Chat model from cache:"
+          du -sh models/chat-model/ 2>/dev/null || echo "(empty)"
+
       # ---- Model cache key ----
       - name: 🗂️ Cache key
         id: cache-key
