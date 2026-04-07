@@ -257,39 +257,83 @@ jobs:
 
       # ---- Step 11: Start ngrok ----
       - name: 🌍 Start ngrok tunnel
+        shell: bash
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
+          set +e  # Don't exit on first error - ngrok needs time to start
+
           # Install ngrok
           curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
-          sudo mv ngrok /usr/local/bin/
+          sudo mv ngrok /usr/local/bin/ 2>/dev/null || mv ngrok /usr/local/bin/
 
           # Configure
           ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
 
-          # Start
+          # Start ngrok in background
           ngrok http $PORT --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
-          echo $! > ngrok.pid
+          NGROK_PID=$!
+          echo $NGROK_PID > ngrok.pid
+          echo "ngrok PID: $NGROK_PID"
 
-          # Wait for tunnel
-          echo "Waiting for ngrok..."
-          for i in $(seq 1 20); do
-            TUNNEL_URL=$(curl -sf http://localhost:4040/api/tunnels 2>/dev/null \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'])" 2>/dev/null)
+          # Give ngrok time to start
+          echo "Waiting for ngrok to initialize..."
+          sleep 3
+
+          # Wait for tunnel with retry
+          TUNNEL_URL=""
+          for i in $(seq 1 30); do
+            echo "  Checking tunnel... ($i/30)"
+            RESPONSE=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "")
+            if [ -n "$RESPONSE" ]; then
+              TUNNEL_URL=$(echo "$RESPONSE" | python3 -c "
+              import sys, json
+              try:
+                  d = json.load(sys.stdin)
+                  print(d['tunnels'][0]['public_url'])
+              except:
+                  pass
+              " 2>/dev/null || "")
+            fi
+
             if [ -n "$TUNNEL_URL" ]; then
+              echo "✅ Tunnel established!"
               echo "PUBLIC_URL=$TUNNEL_URL" >> $GITHUB_ENV
               echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
-              echo "✅ Tunnel: $TUNNEL_URL"
               break
             fi
+
+            # Check if ngrok process is still alive
+            if ! kill -0 $NGROK_PID 2>/dev/null; then
+              echo "⚠️ ngrok process died! Checking log..."
+              cat ngrok.log
+              echo ""
+              echo "Restarting ngrok..."
+              ngrok http $PORT --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
+              NGROK_PID=$!
+              echo $NGROK_PID > ngrok.pid
+              sleep 3
+            fi
+
             sleep 2
           done
 
+          set -e  # Re-enable strict mode
+
           if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ ngrok failed!"
+            echo "❌ ngrok failed to establish tunnel after 60 seconds!"
+            echo "--- ngrok log ---"
             cat ngrok.log
+            echo ""
+            echo "--- ngrok process ---"
+            ps aux | grep ngrok || echo "ngrok not running"
             exit 1
           fi
+
+          echo "============================================"
+          echo "  🌍 AI Video Generator is LIVE!"
+          echo "  📍 URL: $TUNNEL_URL"
+          echo "============================================"
 
       # ---- Step 12: Deployment report ----
       - name: 📊 Deployment Report
@@ -326,6 +370,7 @@ jobs:
       # ---- Step 13: Keep alive (max 6h) ----
       - name: 💓 Keep alive (max 6 hours)
         timeout-minutes: 355
+        shell: bash
         run: |
           echo "============================================"
           echo "  🌍 AI Video Generator is LIVE"
@@ -341,7 +386,8 @@ jobs:
             sleep 90
 
             # Health check
-            if ! curl -sf http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
+            HEALTH=$(curl -s http://localhost:$PORT/api/system/health 2>/dev/null || echo "")
+            if [ -z "$HEALTH" ]; then
               echo "⚠️ Server down, restarting..."
               pkill -f "uvicorn app.main:app" 2>/dev/null || true
               sleep 2
@@ -349,23 +395,28 @@ jobs:
                 --host 0.0.0.0 --port $PORT --workers 1 \
                 --log-level info > server.log 2>&1 &
               sleep 5
-              if curl -sf http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
-                echo "✅ Restarted"
+              HEALTH2=$(curl -s http://localhost:$PORT/api/system/health 2>/dev/null || echo "")
+              if [ -n "$HEALTH2" ]; then
+                echo "✅ Server restarted"
               else
-                echo "❌ Restart failed"
+                echo "❌ Server restart failed"
                 tail -10 server.log
               fi
             fi
 
             # ngrok check
-            if ! curl -sf http://localhost:4040/api/tunnels > /dev/null 2>&1; then
+            NGROK_CHECK=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "")
+            if [ -z "$NGROK_CHECK" ]; then
               echo "⚠️ ngrok down, restarting..."
+              pkill -f ngrok 2>/dev/null || true
+              sleep 2
               ngrok http $PORT --log=stdout > ngrok.log 2>&1 &
               sleep 5
+              echo "ngrok restarted"
             fi
 
             MINUTES=$((COUNT * 90 / 60))
-            echo "💓 [$MINUTES min] Server running at $(date '+%H:%M:%S UTC') — URL: ${TUNNEL_URL}"
+            echo "💓 [$MINUTES min] Server running at $(date '+%H:%M:%S UTC') — ${TUNNEL_URL}"
           done
 
           echo "⏰ 6-hour limit reached. Stopping gracefully."
