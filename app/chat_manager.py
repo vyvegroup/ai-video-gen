@@ -155,13 +155,13 @@ Rules:
             else:
                 text = self._manual_format(messages)
 
-            inputs = self._tokenizer(text, return_tensors="pt", truncation=True, max_length=1024)
+            inputs = self._tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
             inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
 
             with torch.inference_mode():
                 outputs = self._model.generate(
                     **inputs,
-                    max_new_tokens=300,
+                    max_new_tokens=150,
                     do_sample=True,
                     temperature=0.8,
                     top_p=0.9,
@@ -317,6 +317,9 @@ Rules:
         # Build messages for model
         messages = self._build_messages(char, session["messages"])
 
+        # Check if model is still loading (first-time CPU load is slow)
+        model_was_loading = self._loading and not self._loaded
+
         # Generate response in thread pool to avoid blocking
         import asyncio
         loop = asyncio.get_running_loop()
@@ -334,12 +337,15 @@ Rules:
         # Save to disk
         state_manager.save_chat(session_id, session["messages"])
 
-        return {
+        result = {
             "session_id": session_id,
             "response": ai_response,
             "character_name": char.get("name", "Assistant"),
             "message_count": len(session["messages"]),
         }
+        if model_was_loading:
+            result["model_loading"] = True
+        return result
 
     def get_session(self, session_id: str) -> Optional[Dict]:
         """Get session info."""

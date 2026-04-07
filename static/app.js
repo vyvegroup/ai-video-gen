@@ -1300,8 +1300,18 @@
 
   async function chatCreateSession() {
     try {
-      const result = await apiFetch('/api/chat/session', { method: 'POST' });
+      const result = await apiFetch('/api/chat/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
       state.chatSessionId = result.session_id || result.id;
+      // Update messages from server response (includes greeting)
+      if (result.messages && result.messages.length > 0) {
+        state.chatMessages = result.messages;
+        chatRenderMessages();
+      }
+      localStorage.setItem('chatSessionId', state.chatSessionId);
       return state.chatSessionId;
     } catch (err) {
       console.warn('Failed to create chat session:', err);
@@ -1336,7 +1346,6 @@
     if (!state.chatSessionId) {
       const sid = await chatCreateSession();
       if (!sid) return;
-      localStorage.setItem('chatSessionId', state.chatSessionId);
     }
 
     state.chatSending = true;
@@ -1350,12 +1359,29 @@
     chatSetTyping(true);
 
     try {
-      const result = await apiFetch('/api/chat/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: trimmed, session_id: state.chatSessionId }),
-      });
+      // Use AbortController with 3-minute timeout (CPU model is slow)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 180000);
 
+      const resp = await fetch(api('/api/chat/send'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': '1',
+        },
+        body: JSON.stringify({ message: trimmed, session_id: state.chatSessionId }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!resp.ok) {
+        const errorBody = await resp.text();
+        let msg = `HTTP ${resp.status}`;
+        try { msg = JSON.parse(errorBody).detail || msg; } catch (_) {}
+        throw new Error(msg);
+      }
+
+      const result = await resp.json();
       chatSetTyping(false);
 
       const aiMsg = {
@@ -1374,10 +1400,21 @@
 
     } catch (err) {
       chatSetTyping(false);
-      showToast('error', 'Chat error', err.message);
+      if (err.name === 'AbortError') {
+        showToast('warning', 'Chat timeout', 'Response took too long. The model might be loading. Try again.');
+      } else {
+        showToast('error', 'Chat error', err.message);
+      }
+      // Remove the optimistic user message on error
+      const idx = state.chatMessages.findIndex(m => m.role === 'user' && m.content === trimmed && !m.confirmed);
+      if (idx >= 0) state.chatMessages.splice(idx, 1);
+      chatRenderMessages();
     } finally {
       state.chatSending = false;
       $('#chatSendBtn').disabled = false;
+      if (state.chatOpen) {
+        setTimeout(() => { if (state.chatOpen) $('#chatInput').focus(); }, 100);
+      }
     }
   }
 
@@ -1484,7 +1521,7 @@
     });
 
     $('#charSettingsModal').addEventListener('click', (e) => {
-    if (e.target === $('#charSettingsModal')) $('#charSettingsModal').classList.add('hidden');
+      if (e.target === $('#charSettingsModal')) $('#charSettingsModal').classList.add('hidden');
     });
 
     // Character settings save
@@ -1495,13 +1532,19 @@
       $('#charSettingsModal').classList.add('hidden');
     });
 
-    // Try to restore session from localStorage
+    chatUpdateBadge();
+
+    // Try to restore session from localStorage (async, but don't block UI)
     const savedSession = localStorage.getItem('chatSessionId');
     if (savedSession) {
-      chatLoadSession(savedSession);
+      chatLoadSession(savedSession).then(() => {
+        // If session failed to load (server restarted), clear stale state
+        if (!state.chatMessages || state.chatMessages.length === 0) {
+          localStorage.removeItem('chatSessionId');
+          state.chatSessionId = null;
+        }
+      });
     }
-
-    chatUpdateBadge();
   }
 
   // ============================
