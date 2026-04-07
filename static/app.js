@@ -84,9 +84,15 @@
       const resp = await fetch(url, {
         ...options,
         headers: {
+          'ngrok-skip-browser-warning': '1',
           ...(options.headers || {}),
         },
       });
+      // Check if ngrok returned HTML warning page instead of JSON
+      const contentType = resp.headers.get('content-type') || '';
+      if (contentType.includes('text/html') && !path.endsWith('.html') && path.startsWith('/api/')) {
+        throw new Error('ngrok: Click "Visit Site" first, or the tunnel is disconnected');
+      }
       if (!resp.ok) {
         const errorBody = await resp.text();
         let msg = `HTTP ${resp.status}`;

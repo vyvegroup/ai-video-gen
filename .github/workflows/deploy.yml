@@ -185,18 +185,51 @@ jobs:
           pip install pyngrok
           python -c "
           from pyngrok import ngrok
-          import json, os
+          import json, os, time
 
           token = os.environ.get('NGROK_AUTH_TOKEN', '')
           if token:
               ngrok.set_auth_token(token)
+              print('Using ngrok auth token (free account)')
+          else:
+              print('WARNING: No NGROK_AUTH_TOKEN set! Using unauthenticated ngrok.')
 
-          tunnel = ngrok.connect(8000, bind_tls=True)
+          # Start tunnel with options to handle free tier
+          tunnel = ngrok.connect(
+              8000,
+              bind_tls=True,
+              options={
+                  'request_header_add': 'ngrok-skip-browser-warning: 1',
+                  'compression': False,
+              }
+          )
           url = tunnel.public_url
-          print(f'NGROK_URL={url}' )
+          print(f'NGROK_URL={url}')
+
+          # Save URL to env
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write(f'NGROK_URL={url}\n')
+              f.write(f'NGROK_TUNNEL_ID={tunnel.api_request.public_url.split(\"//\")[1].split(\".\")[0]}\n')
+
           print(f'Public URL: {url}')
+
+          # Verify tunnel works
+          import urllib.request
+          for attempt in range(10):
+              try:
+                  req = urllib.request.Request(
+                      f'{url}/api/system/health',
+                      headers={'ngrok-skip-browser-warning': '1'}
+                  )
+                  resp = urllib.request.urlopen(req, timeout=10)
+                  data = resp.read().decode()
+                  print(f'Tunnel verified: {data}')
+                  break
+              except Exception as e:
+                  print(f'Tunnel check {attempt+1}/10 failed: {e}')
+                  time.sleep(2)
+          else:
+              print('WARNING: Could not verify tunnel')
           "
 
       - name: Show access URL
@@ -234,7 +267,7 @@ jobs:
               exit 1
             fi
 
-            # Health check
+            # Local health check
             if ! curl -sf http://localhost:8000/api/system/health > /dev/null 2>&1; then
               echo "Health check failed at $((ELAPSED/60)) minutes, restarting..."
               kill ${{ env.SERVER_PID }} 2>/dev/null || true
@@ -243,6 +276,33 @@ jobs:
               NEW_PID=$!
               echo "SERVER_PID=$NEW_PID" >> $GITHUB_ENV
               sleep 5
+            fi
+
+            # Check ngrok tunnel is still alive
+            if ! curl -sf -H "ngrok-skip-browser-warning: 1" "${{ env.NGROK_URL }}/api/system/health" > /dev/null 2>&1; then
+              echo "ngrok tunnel down at $((ELAPSED/60)) minutes, reconnecting..."
+              python -c "
+          from pyngrok import ngrok
+          import os
+          token = os.environ.get('NGROK_AUTH_TOKEN', '')
+          if token:
+              ngrok.set_auth_token(token)
+          # Kill all existing tunnels
+          tunnels = ngrok.get_tunnels()
+          for t in tunnels:
+              try:
+                  ngrok.disconnect(t.public_url)
+              except:
+                  pass
+          # Reconnect
+          tunnel = ngrok.connect(8000, bind_tls=True)
+          url = tunnel.public_url
+          print(f'New ngrok URL: {url}')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'NGROK_URL={url}\n')
+          "
+              sleep 3
+              echo "ngrok reconnected"
             fi
 
             if [ $((ELAPSED % 300)) -eq 0 ]; then

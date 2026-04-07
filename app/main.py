@@ -19,6 +19,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -30,6 +31,7 @@ from fastapi.responses import (
     JSONResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
 from app.config import (
@@ -69,6 +71,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ============================================================
+# NGROK BYPASS - Skip ngrok browser warning on free tier
+# ============================================================
+class NgrokSkipWarningMiddleware(BaseHTTPMiddleware):
+    """Add ngrok-skip-browser-warning header to bypass ngrok's interstitial page."""
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["ngrok-skip-browser-warning"] = "1"
+        # Also add no-cache headers to prevent stale responses through ngrok
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app.add_middleware(NgrokSkipWarningMiddleware)
 
 # Mount static files
 static_dir = BASE_DIR / "static"
