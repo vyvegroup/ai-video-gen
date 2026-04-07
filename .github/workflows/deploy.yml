@@ -1,19 +1,18 @@
 # =============================================================================
 # AI Video Generator - GitHub Actions Deployment (GitHub-Hosted Runner)
 # =============================================================================
-# Runs on GitHub-hosted ubuntu-latest runner (CPU only, 7GB RAM, 14GB disk)
+# Runs on ubuntu-latest (CPU only, 7GB RAM, 14GB disk)
 #
 # Optimizations:
-#   - CPU-only PyTorch (smaller download)
-#   - actions/cache for model persistence across runs
-#   - CPU-optimized generation defaults
+#   - CPU-only PyTorch (~200MB vs 2.5GB CUDA)
+#   - actions/cache for model persistence
+#   - CPU-optimized defaults
 #   - ngrok tunnel for public access
-#   - 6-hour max timeout (GitHub limit)
+#   - 6-hour max uptime
 #
-# SETUP REQUIRED:
-#   1. Repository Secrets: NGROK_AUTH_TOKEN
-#   2. (Optional) Repository Secrets: HUGGINGFACE_TOKEN
-#   3. (Optional) Repository Variables: DEFAULT_MODEL
+# SETUP:
+#   Secrets: NGROK_AUTH_TOKEN (required), HUGGINGFACE_TOKEN (optional)
+#   Variables: DEFAULT_MODEL (optional)
 # =============================================================================
 
 name: 🎬 Deploy AI Video Generator
@@ -49,9 +48,9 @@ on:
         default: 'low'
         type: choice
         options:
-          - low      # 256x256, 8 frames - fastest
-          - medium   # 384x384, 12 frames - balanced
-          - high     # 576x320, 16 frames - quality
+          - low
+          - medium
+          - high
 
 env:
   PORT: 8000
@@ -60,373 +59,202 @@ env:
 
 jobs:
   deploy:
-    name: 🚀 Deploy AI Video Gen (GitHub Runner)
+    name: 🚀 Deploy (GitHub Runner)
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours (GitHub max)
+    timeout-minutes: 360
 
     steps:
-      # ---- Step 1: Checkout ----
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      # ---- Step 2: System info ----
-      - name: 🔍 System info
-        run: |
-          echo "=== Runner Specs ==="
-          echo "OS: $(uname -a)"
-          echo "CPU cores: $(nproc)"
-          echo "RAM: $(free -h | grep Mem | awk '{print $2}')"
-          echo "Disk: $(df -h / | tail -1 | awk '{print $4}') free"
-          echo "Python: $(python3 --version 2>/dev/null || echo 'not found')"
-
-      # ---- Step 3: Install ffmpeg ----
-      - name: 🎬 Install ffmpeg
+      - name: 🎬 Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
-          echo "✅ ffmpeg $(ffmpeg -version 2>&1 | head -1)"
+          sudo apt-get install -y -qq ffmpeg jq
+          echo "ffmpeg: $(ffmpeg -version 2>&1 | head -1)"
+          echo "jq: $(jq --version)"
 
-      # ---- Step 4: Setup Python ----
-      - name: 🐍 Setup Python ${{ env.PYTHON_VERSION }}
+      - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
-      # ---- Step 5: Install Python deps (CPU-only) ----
-      - name: 📦 Install dependencies
+      - name: 📦 Install Python deps
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-
-          # Install CPU-only PyTorch (much smaller than CUDA version)
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-
-          # Install the rest
           pip install -r requirements-cpu.txt
+          echo "Done: $(pip list | grep -cE 'torch|diffusers|fastapi') packages"
 
-          echo "✅ Dependencies installed"
-          pip list | grep -E "torch|diffusers|transformers|fastapi|uvicorn"
-
-      # ---- Step 6: Cache models ----
-      - name: 🗂️ Get model cache key
-        id: model-cache-key
+      - name: 🗂️ Cache key
+        id: cache-key
         run: |
-          MODEL_ID="${{ github.event.inputs.model_url || vars.DEFAULT_MODEL || 'cerspense/zeroscope_v2_576w' }}"
-          SAFE_NAME=$(echo "$MODEL_ID" | sed 's|/|_|g; s|https://||g; s|http://||g; s|:||g')
-          echo "model_id=$MODEL_ID" >> $GITHUB_OUTPUT
-          echo "safe_name=$SAFE_NAME" >> $GITHUB_OUTPUT
-          echo "cache_key=ai-vid-model-${SAFE_NAME}-$(date +%Y-%m)" >> $GITHUB_OUTPUT
-          echo "Model: $MODEL_ID -> cache key: ai-vid-model-${SAFE_NAME}-$(date +%Y-%m)"
+          MID="${{ github.event.inputs.model_url || vars.DEFAULT_MODEL || 'cerspense/zeroscope_v2_576w' }}"
+          SAFE=$(echo "$MID" | sed 's|/|_|g; s|https://||g; s|http://||g; s|:||g')
+          echo "model_id=$MID" >> $GITHUB_OUTPUT
+          echo "safe_name=$SAFE" >> $GITHUB_OUTPUT
+          echo "key=vid-${SAFE}-$(date +%Y-%m)" >> $GITHUB_OUTPUT
 
-      - name: 💾 Cache model files
+      - name: 💾 Cache model
         uses: actions/cache@v4
         id: model-cache
         with:
           path: models/
-          key: ${{ steps.model-cache-key.outputs.cache_key }}
+          key: ${{ steps.cache-key.outputs.key }}
           restore-keys: |
-            ai-vid-model-${{ steps.model-cache-key.outputs.safe_name }}-
+            vid-${{ steps.cache-key.outputs.safe_name }}-
 
-      # ---- Step 7: Download model (if not cached) ----
-      - name: 🧠 Download AI Model
+      - name: 🧠 Download model
         if: steps.model-cache.outputs.cache-hit != 'true'
         env:
-          MODEL_ID: ${{ steps.model-cache-key.outputs.model_id }}
+          MODEL_ID: ${{ steps.cache-key.outputs.model_id }}
           MODEL_SOURCE: ${{ github.event.inputs.model_source || 'huggingface' }}
           HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
           HF_HOME: /tmp/hf_cache
         run: |
-          mkdir -p models
-          echo "============================================"
-          echo "  Downloading Model: $MODEL_ID"
-          echo "  Source: $MODEL_SOURCE"
-          echo "  Cache: MISS - downloading fresh"
-          echo "============================================"
+          python scripts/download_model.py
+          echo "Model size:"
+          du -sh models/* || echo "(empty)"
 
-          python -c "
-          import os, sys
-          os.environ['HF_HOME'] = os.environ.get('HF_HOME', '/tmp/hf_cache')
-          os.environ['HF_DATASETS_CACHE'] = '/tmp/hf_cache/datasets'
-          os.environ['TRANSFORMERS_CACHE'] = '/tmp/hf_cache/transformers'
-
-          sys.path.insert(0, '.')
-          from app.model_manager import model_manager
-
-          model_url = os.environ['MODEL_ID']
-          model_source = os.environ.get('MODEL_SOURCE', 'huggingface')
-          hf_token = os.environ.get('HF_TOKEN') or None
-
-          info = model_manager.download_model(
-              model_id=model_url,
-              source=model_source,
-              hf_token=hf_token,
-          )
-          print(f'\n✅ Model downloaded: {info.name} ({info.size_mb} MB)')
-          print(f'   Type: {info.type}')
-          print(f'   Path: {info.path}')
-          "
-
-          echo ""
-          echo "=== Models ==="
-          du -sh models/*
-
-      - name: ✅ Model cached
+      - name: ✅ Model from cache
         if: steps.model-cache.outputs.cache-hit == 'true'
         run: |
-          echo "============================================"
-          echo "  ✅ Model loaded from cache!"
-          echo "============================================"
-          ls -la models/
-          du -sh models/*
+          echo "Model loaded from cache:"
+          ls -la models/ | head -10
+          du -sh models/* || echo "(empty)"
 
-      # ---- Step 8: Create data dirs ----
-      - name: 📁 Create directories
-        run: mkdir -p outputs uploads
-
-      # ---- Step 9: Determine resolution preset ----
-      - name: ⚙️ Set resolution preset
+      - name: ⚙️ Resolution preset
         id: preset
         run: |
           case "${{ github.event.inputs.resolution || 'low' }}" in
-            low)
-              echo "width=256" >> $GITHUB_OUTPUT
-              echo "height=256" >> $GITHUB_OUTPUT
-              echo "frames=8" >> $GITHUB_OUTPUT
-              echo "steps=15" >> $GITHUB_OUTPUT
-              ;;
-            medium)
-              echo "width=384" >> $GITHUB_OUTPUT
-              echo "height=384" >> $GITHUB_OUTPUT
-              echo "frames=12" >> $GITHUB_OUTPUT
-              echo "steps=20" >> $GITHUB_OUTPUT
-              ;;
-            high)
-              echo "width=576" >> $GITHUB_OUTPUT
-              echo "height=320" >> $GITHUB_OUTPUT
-              echo "frames=16" >> $GITHUB_OUTPUT
-              echo "steps=25" >> $GITHUB_OUTPUT
-              ;;
+            low)    echo "w=256" >> $GITHUB_OUTPUT; echo "h=256" >> $GITHUB_OUTPUT; echo "f=8"  >> $GITHUB_OUTPUT; echo "s=15" >> $GITHUB_OUTPUT ;;
+            medium) echo "w=384" >> $GITHUB_OUTPUT; echo "h=384" >> $GITHUB_OUTPUT; echo "f=12" >> $GITHUB_OUTPUT; echo "s=20" >> $GITHUB_OUTPUT ;;
+            high)   echo "w=576" >> $GITHUB_OUTPUT; echo "h=320" >> $GITHUB_OUTPUT; echo "f=16" >> $GITHUB_OUTPUT; echo "s=25" >> $GITHUB_OUTPUT ;;
           esac
-          echo "Resolution: ${{ github.event.inputs.resolution || 'low' }} (${{ steps.preset.outputs.width }}x${{ steps.preset.outputs.height }})"
 
-      # ---- Step 10: Start server ----
-      - name: 🌐 Start AI Video Generator
+      - name: 🌐 Start server
         env:
-          ALLOW_NSFW: ${{ env.ALLOW_NSFW }}
-          DEFAULT_NUM_FRAMES: ${{ steps.preset.outputs.frames }}
-          DEFAULT_WIDTH: ${{ steps.preset.outputs.width }}
-          DEFAULT_HEIGHT: ${{ steps.preset.outputs.height }}
-          DEFAULT_NUM_INFERENCE_STEPS: ${{ steps.preset.outputs.steps }}
+          ALLOW_NSFW: "true"
+          DEFAULT_NUM_FRAMES: ${{ steps.preset.outputs.f }}
+          DEFAULT_WIDTH: ${{ steps.preset.outputs.w }}
+          DEFAULT_HEIGHT: ${{ steps.preset.outputs.h }}
+          DEFAULT_NUM_INFERENCE_STEPS: ${{ steps.preset.outputs.s }}
           DEVICE: cpu
         run: |
-          echo "Starting server on port $PORT..."
-          echo "  Device: CPU"
-          echo "  Resolution: $DEFAULT_WIDTH x $DEFAULT_HEIGHT"
-          echo "  Frames: $DEFAULT_NUM_FRAMES"
-          echo "  Steps: $DEFAULT_NUM_INFERENCE_STEPS"
-          echo "  NSFW: $ALLOW_NSFW"
+          mkdir -p outputs uploads
 
           nohup python -m uvicorn app.main:app \
-            --host 0.0.0.0 \
-            --port $PORT \
-            --workers 1 \
-            --log-level info \
+            --host 0.0.0.0 --port $PORT \
+            --workers 1 --log-level info \
             > server.log 2>&1 &
 
-          echo $! > server.pid
-          echo "Server PID: $(cat server.pid)"
-
-          # Wait for server
+          echo "Waiting for server..."
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
-              echo "✅ Server running on port $PORT"
+            if curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
+              echo "Server OK on port $PORT"
               break
             fi
-            echo "  Waiting... ($i/60)"
             sleep 2
           done
 
-          # Verify
-          if ! curl -sf http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
-            echo "❌ Server failed to start!"
+          if ! curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
+            echo "Server FAILED to start:"
             tail -30 server.log
             exit 1
           fi
 
-          curl -sf http://localhost:$PORT/api/system/info | python -m json.tool || true
-
-      # ---- Step 11: Start ngrok ----
-      - name: 🌍 Start ngrok tunnel
-        shell: bash
+      - name: 🌍 Start ngrok
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
-          set +e  # Don't exit on first error - ngrok needs time to start
-
           # Install ngrok
           curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
-          sudo mv ngrok /usr/local/bin/ 2>/dev/null || mv ngrok /usr/local/bin/
+          mv ngrok /usr/local/bin/ 2>/dev/null || true
 
-          # Configure
+          # Configure & start
           ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
-
-          # Start ngrok in background
           ngrok http $PORT --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
-          NGROK_PID=$!
-          echo $NGROK_PID > ngrok.pid
-          echo "ngrok PID: $NGROK_PID"
 
-          # Give ngrok time to start
-          echo "Waiting for ngrok to initialize..."
-          sleep 3
-
-          # Wait for tunnel with retry
-          TUNNEL_URL=""
+          # Wait for tunnel (60 seconds max)
+          echo "Waiting for ngrok tunnel..."
+          TUNNEL=""
           for i in $(seq 1 30); do
-            echo "  Checking tunnel... ($i/30)"
-            RESPONSE=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "")
-            if [ -n "$RESPONSE" ]; then
-              TUNNEL_URL=$(echo "$RESPONSE" | python3 -c "
-              import sys, json
-              try:
-                  d = json.load(sys.stdin)
-                  print(d['tunnels'][0]['public_url'])
-              except:
-                  pass
-              " 2>/dev/null || "")
-            fi
-
-            if [ -n "$TUNNEL_URL" ]; then
-              echo "✅ Tunnel established!"
-              echo "PUBLIC_URL=$TUNNEL_URL" >> $GITHUB_ENV
-              echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
-              break
-            fi
-
-            # Check if ngrok process is still alive
-            if ! kill -0 $NGROK_PID 2>/dev/null; then
-              echo "⚠️ ngrok process died! Checking log..."
-              cat ngrok.log
-              echo ""
-              echo "Restarting ngrok..."
-              ngrok http $PORT --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
-              NGROK_PID=$!
-              echo $NGROK_PID > ngrok.pid
-              sleep 3
-            fi
-
             sleep 2
+            TUNNEL=$(python3 scripts/get_tunnel_url.py 2>/dev/null) && break
+            # Also try with jq as fallback
+            TUNNEL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null) && [ "$TUNNEL" != "null" ] && break
+            TUNNEL=""
+            echo "  retry $i/30..."
           done
 
-          set -e  # Re-enable strict mode
-
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ ngrok failed to establish tunnel after 60 seconds!"
-            echo "--- ngrok log ---"
+          if [ -z "$TUNNEL" ]; then
+            echo "=== NGROK FAILED ==="
+            echo "Log:"
             cat ngrok.log
             echo ""
-            echo "--- ngrok process ---"
-            ps aux | grep ngrok || echo "ngrok not running"
+            echo "Processes:"
+            ps aux | grep -i ngrok
             exit 1
           fi
 
+          echo "PUBLIC_URL=$TUNNEL" >> $GITHUB_ENV
+          echo "TUNNEL_URL=$TUNNEL" >> $GITHUB_ENV
+          echo ""
           echo "============================================"
-          echo "  🌍 AI Video Generator is LIVE!"
-          echo "  📍 URL: $TUNNEL_URL"
+          echo "  LIVE: $TUNNEL"
           echo "============================================"
 
-      # ---- Step 12: Deployment report ----
-      - name: 📊 Deployment Report
+      - name: 📊 Report
         run: |
           echo "## 🎬 AI Video Generator — LIVE" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🌍 Public URL" >> $GITHUB_STEP_SUMMARY
+          echo "### 🌍 URL" >> $GITHUB_STEP_SUMMARY
           echo "**${TUNNEL_URL}**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚙️ Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🖥️ Runner | GitHub-hosted (CPU) |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🧠 Model | \`${{ steps.model-cache-key.outputs.model_id }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 📐 Resolution | ${{ steps.preset.outputs.width }}×${{ steps.preset.outputs.height }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🎞️ Frames | ${{ steps.preset.outputs.frames }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔁 Steps | ${{ steps.preset.outputs.steps }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔞 NSFW | $ALLOW_NSFW |" >> $GITHUB_STEP_SUMMARY
-          echo "| ⏱️ Max uptime | 6 hours |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🕐 Started | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🖥️ | CPU-only GitHub runner |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🧠 | ${{ steps.cache-key.outputs.model_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📐 | ${{ steps.preset.outputs.w }}×${{ steps.preset.outputs.h }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎞️ | ${{ steps.preset.outputs.f }} frames |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔁 | ${{ steps.preset.outputs.s }} steps |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔞 | NSFW $ALLOW_NSFW |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏱️ | Max 6h uptime |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚠️ CPU Mode Notice" >> $GITHUB_STEP_SUMMARY
-          echo "This runs on a **CPU-only** GitHub runner. Generation is slower than GPU." >> $GITHUB_STEP_SUMMARY
-          echo "Use **low** resolution for fastest results, **high** for better quality." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📱 How to use" >> $GITHUB_STEP_SUMMARY
-          echo "1. Open **${TUNNEL_URL}**" >> $GITHUB_STEP_SUMMARY
-          echo "2. Go to **Models** tab → Load a model" >> $GITHUB_STEP_SUMMARY
-          echo "3. Go to **Create** tab → Upload image or type prompt" >> $GITHUB_STEP_SUMMARY
-          echo "4. Click **Generate** ⚡" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> ⏰ Server auto-stops after 6 hours (GitHub Actions limit)." >> $GITHUB_STEP_SUMMARY
+          echo "1. Open the URL above" >> $GITHUB_STEP_SUMMARY
+          echo "2. Models tab → Load model" >> $GITHUB_STEP_SUMMARY
+          echo "3. Create tab → Generate ⚡" >> $GITHUB_STEP_SUMMARY
 
-      # ---- Step 13: Keep alive (max 6h) ----
-      - name: 💓 Keep alive (max 6 hours)
+      - name: 💓 Keep alive
         timeout-minutes: 355
-        shell: bash
         run: |
-          echo "============================================"
-          echo "  🌍 AI Video Generator is LIVE"
-          echo "  📍 ${TUNNEL_URL}"
-          echo "  ⏱️  Auto-stop in ~6 hours"
-          echo "============================================"
-
-          COUNT=0
-          MAX_LOOPS=210  # 355min / ~1.7min per loop
-
-          while [ $COUNT -lt $MAX_LOOPS ]; do
-            COUNT=$((COUNT + 1))
+          echo "Server live: ${TUNNEL_URL}"
+          N=0
+          while [ $N -lt 210 ]; do
+            N=$((N+1))
             sleep 90
-
-            # Health check
-            HEALTH=$(curl -s http://localhost:$PORT/api/system/health 2>/dev/null || echo "")
-            if [ -z "$HEALTH" ]; then
-              echo "⚠️ Server down, restarting..."
-              pkill -f "uvicorn app.main:app" 2>/dev/null || true
+            # Server health
+            curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1 || {
+              echo "Server down, restarting..."
+              pkill -f "uvicorn app.main" 2>/dev/null
               sleep 2
-              nohup python -m uvicorn app.main:app \
-                --host 0.0.0.0 --port $PORT --workers 1 \
-                --log-level info > server.log 2>&1 &
+              nohup python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info > server.log 2>&1 &
               sleep 5
-              HEALTH2=$(curl -s http://localhost:$PORT/api/system/health 2>/dev/null || echo "")
-              if [ -n "$HEALTH2" ]; then
-                echo "✅ Server restarted"
-              else
-                echo "❌ Server restart failed"
-                tail -10 server.log
-              fi
-            fi
-
-            # ngrok check
-            NGROK_CHECK=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "")
-            if [ -z "$NGROK_CHECK" ]; then
-              echo "⚠️ ngrok down, restarting..."
-              pkill -f ngrok 2>/dev/null || true
+            }
+            # Ngrok health
+            curl -s http://localhost:4040/api/tunnels > /dev/null 2>&1 || {
+              echo "Ngrok down, restarting..."
+              pkill -f ngrok 2>/dev/null
               sleep 2
               ngrok http $PORT --log=stdout > ngrok.log 2>&1 &
               sleep 5
-              echo "ngrok restarted"
-            fi
-
-            MINUTES=$((COUNT * 90 / 60))
-            echo "💓 [$MINUTES min] Server running at $(date '+%H:%M:%S UTC') — ${TUNNEL_URL}"
+            }
+            echo "[$((N*90/60))m] alive"
           done
+          echo "6h limit reached."
 
-          echo "⏰ 6-hour limit reached. Stopping gracefully."
-
-      # ---- Cleanup ----
       - name: 🧹 Cleanup
         if: always()
         run: |
-          [ -f server.pid ] && kill $(cat server.pid) 2>/dev/null || true
-          [ -f ngrok.pid ]  && kill $(cat ngrok.pid) 2>/dev/null || true
-          pkill -f uvicorn 2>/dev/null || true
-          pkill -f ngrok    2>/dev/null || true
-          echo "✅ Cleaned up"
+          pkill -f "uvicorn app.main" 2>/dev/null || true
+          pkill -f ngrok 2>/dev/null || true
