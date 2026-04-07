@@ -73,6 +73,10 @@ if static_dir.exists():
 if OUTPUTS_DIR.exists():
     app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs")
 
+# Mount uploads directory
+if UPLOADS_DIR.exists():
+    app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+
 
 # ============================================================
 # PAGES
