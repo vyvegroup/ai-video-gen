@@ -1,0 +1,392 @@
+# =============================================================================
+# AI Video Generator - GitHub Actions Deployment
+# =============================================================================
+# This workflow:
+#   1. Sets up the Python environment on a self-hosted runner (with GPU)
+#   2. Installs all dependencies (PyTorch, diffusers, etc.)
+#   3. Downloads specified AI models (safetensors / HuggingFace)
+#   4. Starts the FastAPI web server on port 8000
+#   5. Creates an ngrok public tunnel
+#   6. Reports the public URL back via GitHub Actions summary
+#
+# PREREQUISITES:
+#   - A self-hosted GitHub Actions runner with NVIDIA GPU + CUDA drivers
+#   - GitHub Secrets: NGROK_AUTH_TOKEN
+#   - GitHub Variables (optional): DEFAULT_MODEL, HUGGINGFACE_TOKEN
+# =============================================================================
+
+name: 🎬 Deploy AI Video Generator
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: 'Model to download (HuggingFace ID or direct URL)'
+        required: false
+        default: 'stabilityai/stable-video-diffusion-img2vid-xt'
+      model_source:
+        description: 'Model source'
+        required: false
+        default: 'huggingface'
+        type: choice
+        options:
+          - huggingface
+          - url
+      allow_nsfw:
+        description: 'Allow NSFW content'
+        required: false
+        default: true
+        type: boolean
+      restart_server:
+        description: 'Force restart server'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  PORT: 8000
+  ALLOW_NSFW: ${{ github.event.inputs.allow_nsfw || 'true' }}
+
+jobs:
+  deploy:
+    name: 🚀 Deploy AI Video Gen Server
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 1440  # 24 hours max
+
+    steps:
+      # ---- Step 1: Checkout code ----
+      - name: 📦 Checkout repository
+        uses: actions/checkout@v4
+
+      # ---- Step 2: Check system requirements ----
+      - name: 🔍 Check GPU availability
+        run: |
+          echo "=== System Information ==="
+          echo "OS: $(uname -a)"
+          echo "CPU: $(nproc) cores"
+          echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+          echo ""
+
+          if command -v nvidia-smi &> /dev/null; then
+            echo "=== GPU Information ==="
+            nvidia-smi --query-gpu=name,driver_version,memory.total,memory.free --format=csv,noheader
+            echo ""
+            echo "✅ NVIDIA GPU detected"
+          else
+            echo "⚠️ No NVIDIA GPU detected - generation will be slow on CPU"
+          fi
+
+          if command -v ffmpeg &> /dev/null; then
+            echo "✅ ffmpeg version: $(ffmpeg -version 2>&1 | head -1)"
+          else
+            echo "⚠️ ffmpeg not found - installing..."
+          fi
+
+      # ---- Step 3: Install system dependencies ----
+      - name: 🛠️ Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            python3.10 python3-pip python3.10-venv ffmpeg curl wget git
+          
+          # Upgrade pip
+          python3.10 -m pip install --upgrade pip setuptools wheel
+
+      # ---- Step 4: Set up Python virtual environment ----
+      - name: 🐍 Set up Python environment
+        run: |
+          if [ ! -d "venv" ]; then
+            echo "Creating Python virtual environment..."
+            python3.10 -m venv venv
+          fi
+          
+          echo "Activating venv and installing dependencies..."
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          
+          echo "✅ Python environment ready"
+          echo "Installed packages:"
+          pip list | grep -E "torch|diffusers|transformers|fastapi|uvicorn|safetensors"
+
+      # ---- Step 5: Kill existing processes ----
+      - name: 🔄 Kill existing server processes
+        if: ${{ github.event.inputs.restart_server == 'true' || true }}
+        run: |
+          echo "Stopping any existing server..."
+          pkill -f "uvicorn app.main:app" 2>/dev/null || true
+          pkill -f "ngrok" 2>/dev/null || true
+          sleep 2
+          echo "✅ Existing processes stopped"
+
+      # ---- Step 6: Create directories ----
+      - name: 📁 Create data directories
+        run: |
+          mkdir -p models outputs uploads
+          echo "✅ Data directories created"
+
+      # ---- Step 7: Download AI model ----
+      - name: 🧠 Download AI Model
+        env:
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: |
+          source venv/bin/activate
+          
+          # Determine model URL from input or variable
+          MODEL_URL="${{ github.event.inputs.model_url }}"
+          MODEL_SOURCE="${{ github.event.inputs.model_source }}"
+          
+          if [ -z "$MODEL_URL" ]; then
+            MODEL_URL="${{ vars.DEFAULT_MODEL }}"
+          fi
+          if [ -z "$MODEL_SOURCE" ]; then
+            MODEL_SOURCE="huggingface"
+          fi
+          
+          if [ -z "$MODEL_URL" ]; then
+            MODEL_URL="stabilityai/stable-video-diffusion-img2vid-xt"
+            MODEL_SOURCE="huggingface"
+          fi
+          
+          echo "============================================"
+          echo "  Downloading Model: $MODEL_URL"
+          echo "  Source: $MODEL_SOURCE"
+          echo "============================================"
+          
+          # Check if model already exists
+          SAFE_NAME=$(echo "$MODEL_URL" | sed 's|/|_|g; s|https://||g; s|http://||g; s|:||g')
+          if [ -d "models/$SAFE_NAME" ] && [ "$(ls -A models/$SAFE_NAME 2>/dev/null)" ]; then
+            echo "✅ Model already exists at models/$SAFE_NAME"
+            echo "Skipping download. Delete the folder to re-download."
+            ls -la models/$SAFE_NAME | head -20
+          else
+            echo "Downloading model..."
+            
+            # Use Python script to download model
+            python3 << 'PYTHON_SCRIPT'
+          import os
+          import sys
+          sys.path.insert(0, '/app')
+          
+          from app.model_manager import model_manager
+          
+          model_url = os.environ.get("MODEL_URL", "")
+          model_source = os.environ.get("MODEL_SOURCE", "huggingface")
+          hf_token = os.environ.get("HF_TOKEN") or None
+          
+          try:
+              info = model_manager.download_model(
+                  model_id=model_url,
+                  source=model_source,
+                  hf_token=hf_token,
+              )
+              print(f"\n✅ Model downloaded successfully!")
+              print(f"   Name: {info.name}")
+              print(f"   Type: {info.type}")
+              print(f"   Size: {info.size_mb} MB")
+              print(f"   Path: {info.path}")
+          except Exception as e:
+              print(f"\n❌ Download failed: {e}")
+              sys.exit(1)
+          PYTHON_SCRIPT
+          fi
+          
+          echo ""
+          echo "=== All Models ==="
+          ls -la models/
+
+      # ---- Step 8: Start the web server ----
+      - name: 🌐 Start AI Video Generator server
+        env:
+          ALLOW_NSFW: ${{ env.ALLOW_NSFW }}
+        run: |
+          source venv/bin/activate
+          
+          echo "Starting AI Video Generator server on port $PORT..."
+          echo "NSFW: $ALLOW_NSFW"
+          
+          # Start server in background
+          nohup python -m uvicorn app.main:app \
+            --host 0.0.0.0 \
+            --port $PORT \
+            --workers 1 \
+            --log-level info \
+            > server.log 2>&1 &
+          
+          SERVER_PID=$!
+          echo $SERVER_PID > server.pid
+          echo "Server PID: $SERVER_PID"
+          
+          # Wait for server to start
+          echo "Waiting for server to be ready..."
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
+              echo "✅ Server is running on port $PORT"
+              break
+            fi
+            echo "  Waiting... ($i/30)"
+            sleep 2
+          done
+          
+          # Check server status
+          if curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
+            echo "✅ Server health check passed"
+            curl -s http://localhost:$PORT/api/system/info | python -m json.tool 2>/dev/null || true
+          else
+            echo "❌ Server failed to start"
+            echo "--- Server Log ---"
+            tail -50 server.log
+            exit 1
+          fi
+
+      # ---- Step 9: Start ngrok tunnel ----
+      - name: 🌍 Start ngrok tunnel
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          # Check if ngrok is installed
+          if ! command -v ngrok &> /dev/null; then
+            echo "Installing ngrok..."
+            curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
+            sudo mv ngrok /usr/local/bin/
+          fi
+          
+          # Configure ngrok
+          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
+          
+          # Kill any existing ngrok
+          pkill -f ngrok 2>/dev/null || true
+          sleep 2
+          
+          # Start ngrok in background
+          ngrok http $PORT --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
+          NGROK_PID=$!
+          echo $NGROK_PID > ngrok.pid
+          
+          # Wait for ngrok to establish tunnel
+          echo "Waiting for ngrok tunnel..."
+          for i in $(seq 1 15); do
+            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; data=json.load(sys.stdin); print(data['tunnels'][0]['public_url'])" 2>/dev/null)
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "✅ ngrok tunnel established!"
+              echo "PUBLIC_URL=$TUNNEL_URL" >> $GITHUB_ENV
+              echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+              break
+            fi
+            echo "  Waiting... ($i/15)"
+            sleep 2
+          done
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ ngrok failed to establish tunnel"
+            cat ngrok.log
+            exit 1
+          fi
+          
+          echo "============================================"
+          echo "  🌍 AI Video Generator is LIVE!"
+          echo "  📍 URL: $TUNNEL_URL"
+          echo "============================================"
+
+      # ---- Step 10: Report status ----
+      - name: 📊 Deployment Summary
+        run: |
+          echo "## 🎬 AI Video Generator - Deployment Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Deployment Status: RUNNING" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌍 Public URL | **${TUNNEL_URL}** |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📍 Local Port | $PORT |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🧠 Model | \`${{ github.event.inputs.model_url || vars.DEFAULT_MODEL || 'stabilityai/stable-video-diffusion-img2vid-xt' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔞 NSFW | ${{ env.ALLOW_NSFW }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🕐 Deployed at | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 How to use" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Open **${TUNNEL_URL}** on your phone or browser" >> $GITHUB_STEP_SUMMARY
+          echo "2. Upload an image or enter a text prompt" >> $GITHUB_STEP_SUMMARY
+          echo "3. Click **Generate** and wait for the video" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Show system info
+          echo "### 💻 System Info" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          curl -s http://localhost:$PORT/api/system/info | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print('| Item | Value |')
+          print('|------|-------|')
+          print(f'| GPU | {data.get(\"gpu_name\", \"CPU only\")} |')
+          print(f'| VRAM | {data.get(\"gpu_memory_total_gb\", \"N/A\")} GB |')
+          print(f'| PyTorch | {data.get(\"torch_version\", \"N/A\")} |')
+          print(f'| CUDA | {data.get(\"cuda_version\", \"N/A\")} |')
+          print(f'| Current Model | {data.get(\"current_model\", \"None\")} |')
+          " >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "Could not fetch system info" >> $GITHUB_STEP_SUMMARY
+
+      # ---- Step 11: Keep alive ----
+      - name: 💓 Keep server alive
+        run: |
+          echo "Server is running. This step keeps the GitHub Actions job alive."
+          echo "Public URL: ${TUNNEL_URL}"
+          echo ""
+          echo "The server will keep running as long as this job is active."
+          echo "To stop: Cancel this workflow run or push with restart_server=true"
+          echo ""
+          
+          # Health check loop - keeps job running and monitors server
+          while true; do
+            sleep 60
+            
+            # Check server health
+            if ! curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
+              echo "⚠️ Server health check failed, restarting..."
+              source venv/bin/activate
+              pkill -f "uvicorn app.main:app" 2>/dev/null || true
+              sleep 2
+              nohup python -m uvicorn app.main:app \
+                --host 0.0.0.0 \
+                --port $PORT \
+                --workers 1 \
+                --log-level info \
+                > server.log 2>&1 &
+              
+              sleep 5
+              if curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
+                echo "✅ Server restarted successfully"
+              else
+                echo "❌ Server failed to restart"
+                tail -20 server.log
+              fi
+            fi
+            
+            # Check ngrok
+            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; data=json.load(sys.stdin); print(data['tunnels'][0]['public_url'])" 2>/dev/null)
+            if [ -z "$TUNNEL_URL" ]; then
+              echo "⚠️ ngrok tunnel lost, restarting..."
+              pkill -f ngrok 2>/dev/null || true
+              sleep 2
+              ngrok http $PORT --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
+              sleep 5
+            fi
+            
+            echo "💓 Heartbeat: Server running at $(date)"
+          done
+
+      # ---- Cleanup on cancel ----
+      - name: 🧹 Cleanup (runs on cancellation)
+        if: cancelled()
+        run: |
+          echo "Cleaning up..."
+          if [ -f server.pid ]; then
+            kill $(cat server.pid) 2>/dev/null || true
+          fi
+          if [ -f ngrok.pid ]; then
+            kill $(cat ngrok.pid) 2>/dev/null || true
+          fi
+          pkill -f "uvicorn app.main:app" 2>/dev/null || true
+          pkill -f ngrok 2>/dev/null || true
+          echo "✅ Cleanup complete"

@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AI Video Gen</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+</head>
+<body>
+
+  <!-- ===== HEADER ===== -->
+  <header class="header" id="header">
+    <div class="header-left">
+      <span class="logo">🎬 <span class="logo-text">AI Video Gen</span></span>
+    </div>
+    <div class="header-right">
+      <div class="system-badge" id="systemBadge" title="System Info">
+        <span class="badge-dot"></span>
+        <span class="badge-text">Checking...</span>
+      </div>
+      <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Open settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ===== MAIN CONTENT ===== -->
+  <main class="main" id="main">
+
+    <!-- ===== TAB NAVIGATION ===== -->
+    <nav class="tab-nav" id="tabNav">
+      <button class="tab-btn active" data-tab="create">
+        <span class="tab-icon">⚡</span>
+        <span class="tab-label">Create</span>
+      </button>
+      <button class="tab-btn" data-tab="models">
+        <span class="tab-icon">🧠</span>
+        <span class="tab-label">Models</span>
+      </button>
+      <button class="tab-btn" data-tab="gallery">
+        <span class="tab-icon">🎨</span>
+        <span class="tab-label">Gallery</span>
+      </button>
+    </nav>
+
+    <!-- ===== CREATE TAB ===== -->
+    <section class="tab-content active" id="tab-create">
+
+      <!-- Model Selector -->
+      <div class="glass-card">
+        <label class="field-label" for="modelSelect">🧠 Model</label>
+        <div class="select-wrapper">
+          <select id="modelSelect" class="field-input">
+            <option value="">Loading models...</option>
+          </select>
+          <span class="select-arrow">▾</span>
+        </div>
+        <button class="btn btn-sm btn-outline mt-2" id="refreshModelsBtn">🔄 Refresh</button>
+      </div>
+
+      <!-- Generation Mode Toggle -->
+      <div class="glass-card">
+        <label class="field-label">🎯 Generation Mode</label>
+        <div class="toggle-group">
+          <button class="toggle-btn active" data-mode="image">
+            <span>🖼️</span> Image → Video
+          </button>
+          <button class="toggle-btn" data-mode="text">
+            <span>✍️</span> Text → Video
+          </button>
+        </div>
+      </div>
+
+      <!-- Image Upload (Image mode) -->
+      <div class="glass-card" id="imageUploadCard">
+        <label class="field-label">🖼️ Source Image</label>
+        <div class="upload-zone" id="uploadZone">
+          <input type="file" id="imageInput" accept="image/*" hidden>
+          <div class="upload-placeholder" id="uploadPlaceholder">
+            <div class="upload-icon">📥</div>
+            <p class="upload-text">Drag & drop an image here</p>
+            <p class="upload-subtext">or click to browse</p>
+            <p class="upload-hint">PNG, JPG, WEBP supported</p>
+          </div>
+          <div class="upload-preview hidden" id="uploadPreview">
+            <img id="previewImage" src="" alt="Preview">
+            <button class="btn-remove" id="removeImageBtn" title="Remove image">✕</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Text Prompt (Text mode) -->
+      <div class="glass-card hidden" id="textPromptCard">
+        <label class="field-label" for="promptInput">✍️ Prompt</label>
+        <div class="textarea-wrapper">
+          <textarea id="promptInput" class="field-input field-textarea" placeholder="Describe the video you want to generate..." rows="4" maxlength="2000"></textarea>
+          <span class="char-count"><span id="charCount">0</span>/2000</span>
+        </div>
+      </div>
+
+      <!-- Negative Prompt (collapsible) -->
+      <div class="glass-card">
+        <button class="collapsible-header" id="negPromptToggle">
+          <label class="field-label">🚫 Negative Prompt</label>
+          <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+        </button>
+        <div class="collapsible-body hidden" id="negPromptBody">
+          <textarea id="negativePrompt" class="field-input field-textarea" placeholder="Things to avoid in the generation..." rows="3" maxlength="1000"></textarea>
+        </div>
+      </div>
+
+      <!-- Advanced Settings (collapsible) -->
+      <div class="glass-card">
+        <button class="collapsible-header" id="advancedToggle">
+          <label class="field-label">⚙️ Advanced Settings</label>
+          <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+        </button>
+        <div class="collapsible-body hidden" id="advancedBody">
+          <div class="settings-grid">
+
+            <!-- Frames -->
+            <div class="setting-item">
+              <div class="setting-header">
+                <label for="framesSlider">Frames</label>
+                <span class="setting-value" id="framesValue">14</span>
+              </div>
+              <input type="range" id="framesSlider" class="range-slider" min="1" max="60" value="14">
+            </div>
+
+            <!-- Inference Steps -->
+            <div class="setting-item">
+              <div class="setting-header">
+                <label for="stepsSlider">Steps</label>
+                <span class="setting-value" id="stepsValue">25</span>
+              </div>
+              <input type="range" id="stepsSlider" class="range-slider" min="1" max="100" value="25">
+            </div>
+
+            <!-- FPS -->
+            <div class="setting-item">
+              <div class="setting-header">
+                <label for="fpsSlider">FPS</label>
+                <span class="setting-value" id="fpsValue">6</span>
+              </div>
+              <input type="range" id="fpsSlider" class="range-slider" min="1" max="30" value="6">
+            </div>
+
+            <!-- Seed -->
+            <div class="setting-item">
+              <div class="setting-header">
+                <label for="seedInput">Seed</label>
+                <button class="btn-link" id="randomSeedBtn" title="Random seed">🎲</button>
+              </div>
+              <input type="number" id="seedInput" class="field-input" value="-1" min="-1">
+            </div>
+
+            <!-- Motion Bucket ID (SVD) -->
+            <div class="setting-item" id="motionBucketItem">
+              <div class="setting-header">
+                <label for="motionBucketSlider">Motion Bucket</label>
+                <span class="setting-value" id="motionBucketValue">127</span>
+              </div>
+              <input type="range" id="motionBucketSlider" class="range-slider" min="1" max="255" value="127">
+            </div>
+
+            <!-- Noise Aug Strength (SVD) -->
+            <div class="setting-item" id="noiseAugItem">
+              <div class="setting-header">
+                <label for="noiseAugSlider">Noise Aug</label>
+                <span class="setting-value" id="noiseAugValue">0.02</span>
+              </div>
+              <input type="range" id="noiseAugSlider" class="range-slider" min="0" max="1" step="0.01" value="0.02">
+            </div>
+
+            <!-- CFG Scale (Text2Video) -->
+            <div class="setting-item hidden" id="cfgScaleItem">
+              <div class="setting-header">
+                <label for="cfgScaleSlider">CFG Scale</label>
+                <span class="setting-value" id="cfgScaleValue">7.5</span>
+              </div>
+              <input type="range" id="cfgScaleSlider" class="range-slider" min="1" max="20" step="0.5" value="7.5">
+            </div>
+
+            <!-- Width -->
+            <div class="setting-item">
+              <div class="setting-header">
+                <label for="widthInput">Width</label>
+              </div>
+              <input type="number" id="widthInput" class="field-input" value="1024" min="64" max="2048" step="64">
+            </div>
+
+            <!-- Height -->
+            <div class="setting-item">
+              <div class="setting-header">
+                <label for="heightInput">Height</label>
+              </div>
+              <input type="number" id="heightInput" class="field-input" value="576" min="64" max="2048" step="64">
+            </div>
+
+            <!-- NSFW Toggle -->
+            <div class="setting-item">
+              <div class="setting-header">
+                <label>NSFW Content</label>
+                <label class="switch">
+                  <input type="checkbox" id="nsfwToggle">
+                  <span class="switch-slider"></span>
+                </label>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- Generate Button -->
+      <div class="generate-section">
+        <button class="btn btn-generate" id="generateBtn">
+          <span class="generate-content">
+            <span class="generate-icon">⚡</span>
+            <span class="generate-text">Generate Video</span>
+          </span>
+          <span class="shimmer"></span>
+        </button>
+      </div>
+
+      <!-- Progress Panel -->
+      <div class="glass-card hidden" id="progressPanel">
+        <div class="progress-header">
+          <span class="progress-title">🎬 Generating...</span>
+          <span class="progress-time" id="elapsedTime">00:00</span>
+        </div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progressBar" style="width: 0%"></div>
+          <span class="progress-percent" id="progressPercent">0%</span>
+        </div>
+        <p class="progress-step" id="progressStep">Initializing...</p>
+        <button class="btn btn-sm btn-danger" id="cancelBtn">✕ Cancel</button>
+      </div>
+
+      <!-- Result Display -->
+      <div class="glass-card hidden" id="resultPanel">
+        <div class="result-header">
+          <h3 class="result-title">✨ Result</h3>
+          <div class="result-actions-top">
+            <button class="btn btn-sm btn-outline" id="downloadMp4Btn">📥 MP4</button>
+            <button class="btn btn-sm btn-outline" id="downloadGifBtn">📥 GIF</button>
+          </div>
+        </div>
+        <div class="result-video-wrapper">
+          <video id="resultVideo" controls loop playsinline>
+            Your browser does not support video playback.
+          </video>
+        </div>
+        <div class="result-info" id="resultInfo">
+          <span>⏱️ <span id="resultTime">--</span></span>
+          <span>🎞️ <span id="resultFrames">--</span> frames</span>
+          <span>🎲 Seed: <span id="resultSeed">--</span></span>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ===== MODELS TAB ===== -->
+    <section class="tab-content" id="tab-models">
+
+      <!-- Download Model -->
+      <div class="glass-card">
+        <label class="field-label">📥 Download Model</label>
+        <div class="toggle-group mb-3">
+          <button class="toggle-btn active" data-source="huggingface">
+            <span>🤗</span> HuggingFace
+          </button>
+          <button class="toggle-btn" data-source="direct">
+            <span>🔗</span> Direct URL
+          </button>
+        </div>
+        <input type="text" id="modelUrlInput" class="field-input mb-2" placeholder="stabilityai/stable-video-diffusion-img2vid-xt">
+        <div class="field-hint" id="modelUrlHint">Enter HuggingFace model ID (e.g. stabilityai/stable-video-diffusion-img2vid-xt)</div>
+        <input type="password" id="hfTokenInput" class="field-input mb-2" placeholder="HuggingFace Token (optional, for gated models)">
+        <div class="field-hint">Leave token empty for public models</div>
+        <div class="flex gap-2">
+          <button class="btn btn-primary flex-1" id="downloadModelBtn">📥 Download</button>
+        </div>
+        <div class="download-progress hidden" id="downloadProgress">
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="downloadProgressBar" style="width: 0%"></div>
+          </div>
+          <p class="progress-step" id="downloadProgressText">Starting download...</p>
+        </div>
+      </div>
+
+      <!-- Suggested Models -->
+      <div class="glass-card">
+        <label class="field-label">⭐ Suggested Models</label>
+        <div class="suggested-models" id="suggestedModels">
+          <div class="loading-skeleton"><div class="skeleton-line"></div><div class="skeleton-line short"></div></div>
+        </div>
+      </div>
+
+      <!-- Model List -->
+      <div class="glass-card">
+        <label class="field-label">📦 Installed Models</label>
+        <div class="model-list" id="modelList">
+          <div class="loading-skeleton"><div class="skeleton-line"></div><div class="skeleton-line short"></div></div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ===== GALLERY TAB ===== -->
+    <section class="tab-content" id="tab-gallery">
+      <div class="gallery-header">
+        <label class="field-label">🎨 Gallery</label>
+        <button class="btn btn-sm btn-outline" id="refreshGalleryBtn">🔄 Refresh</button>
+      </div>
+      <div class="gallery-grid" id="galleryGrid">
+        <div class="gallery-empty hidden" id="galleryEmpty">
+          <div class="empty-icon">🎨</div>
+          <h3>No videos yet</h3>
+          <p>Generate your first video to see it here!</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ===== SETTINGS MODAL ===== -->
+  <div class="modal-overlay hidden" id="settingsModal">
+    <div class="modal glass-card">
+      <div class="modal-header">
+        <h2 class="modal-title">⚙️ Settings</h2>
+        <button class="modal-close" id="settingsClose" aria-label="Close settings">✕</button>
+      </div>
+      <div class="modal-body">
+        <!-- Server URL -->
+        <div class="setting-item mb-4">
+          <label class="field-label" for="serverUrlInput">🌐 Server URL</label>
+          <input type="text" id="serverUrlInput" class="field-input" placeholder="http://localhost:8000">
+          <div class="field-hint">Base URL for API calls</div>
+        </div>
+
+        <!-- Global NSFW -->
+        <div class="setting-item mb-4">
+          <div class="setting-header">
+            <label>🔞 Allow NSFW Content (Global)</label>
+            <label class="switch">
+              <input type="checkbox" id="globalNsfwToggle">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Default Parameters -->
+        <div class="setting-item mb-4">
+          <label class="field-label">🔧 Default Parameters</label>
+          <div class="default-params-grid">
+            <div>
+              <label for="defaultFrames">Frames</label>
+              <input type="number" id="defaultFrames" class="field-input" value="14" min="1" max="60">
+            </div>
+            <div>
+              <label for="defaultSteps">Steps</label>
+              <input type="number" id="defaultSteps" class="field-input" value="25" min="1" max="100">
+            </div>
+            <div>
+              <label for="defaultFps">FPS</label>
+              <input type="number" id="defaultFps" class="field-input" value="6" min="1" max="30">
+            </div>
+          </div>
+        </div>
+
+        <!-- System Info -->
+        <div class="setting-item mb-4">
+          <label class="field-label">💻 System Info</label>
+          <div class="system-info" id="systemInfo">
+            <div class="loading-skeleton"><div class="skeleton-line"></div><div class="skeleton-line short"></div></div>
+          </div>
+        </div>
+
+        <!-- About -->
+        <div class="setting-item">
+          <label class="field-label">ℹ️ About</label>
+          <div class="about-info">
+            <p><strong>AI Video Gen</strong> v1.0.0</p>
+            <p>Powered by Stable Video Diffusion & FastAPI</p>
+            <p class="text-muted">Built with ❤️ for creative AI</p>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="saveSettingsBtn">💾 Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== DELETE CONFIRMATION MODAL ===== -->
+  <div class="modal-overlay hidden" id="deleteModal">
+    <div class="modal glass-card modal-sm">
+      <div class="modal-header">
+        <h2 class="modal-title">🗑️ Confirm Delete</h2>
+      </div>
+      <div class="modal-body">
+        <p id="deleteMessage">Are you sure you want to delete this?</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" id="deleteCancelBtn">Cancel</button>
+        <button class="btn btn-danger" id="deleteConfirmBtn">🗑️ Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== TOAST CONTAINER ===== -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

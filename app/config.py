@@ -1,0 +1,78 @@
+"""
+Configuration for AI Video Generation App
+"""
+import os
+from pathlib import Path
+
+# Base directories
+BASE_DIR = Path(__file__).parent.parent
+MODELS_DIR = BASE_DIR / "models"
+OUTPUTS_DIR = BASE_DIR / "outputs"
+UPLOADS_DIR = BASE_DIR / "uploads"
+
+# Ensure directories exist
+for d in [MODELS_DIR, OUTPUTS_DIR, UPLOADS_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
+# Server config
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8000"))
+
+# Model config
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "stabilityai/stable-video-diffusion-img2vid-xt")
+ALLOW_NSFW = os.getenv("ALLOW_NSFW", "false").lower() == "true"
+DEVICE = os.getenv("DEVICE", "auto")  # auto, cuda, cpu, mps
+DTYPE = os.getenv("DTYPE", "auto")  # auto, fp16, bf16, fp32
+
+# Generation defaults
+DEFAULT_NUM_FRAMES = int(os.getenv("DEFAULT_NUM_FRAMES", "14"))
+DEFAULT_NUM_INFERENCE_STEPS = int(os.getenv("DEFAULT_NUM_INFERENCE_STEPS", "25"))
+DEFAULT_FPS = int(os.getenv("DEFAULT_FPS", "6"))
+DEFAULT_SEED = int(os.getenv("DEFAULT_SEED", "-1"))  # -1 = random
+DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
+DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "576"))
+DEFAULT_MOTION_BUCKET_ID = int(os.getenv("DEFAULT_MOTION_BUCKET_ID", "127"))
+DEFAULT_NOISE_AUG_STRENGTH = float(os.getenv("DEFAULT_NOISE_AUG_STRENGTH", "0.02"))
+DEFAULT_CFG_SCALE = float(os.getenv("DEFAULT_CFG_SCALE", "3.0"))
+
+# Model registry - known model types and their configs
+MODEL_REGISTRY = {
+    "stabilityai/stable-video-diffusion-img2vid-xt": {
+        "type": "svd",
+        "pipeline": "StableVideoDiffusionPipeline",
+        "description": "Stable Video Diffusion - Image to Video (XT)",
+        "default_frames": 25,
+        "max_frames": 25,
+        "supports_text2video": False,
+    },
+    "stabilityai/stable-video-diffusion-img2vid": {
+        "type": "svd",
+        "pipeline": "StableVideoDiffusionPipeline",
+        "description": "Stable Video Diffusion - Image to Video",
+        "default_frames": 14,
+        "max_frames": 14,
+        "supports_text2video": False,
+    },
+    "cerspense/zeroscope_v2_576w": {
+        "type": "text2video",
+        "pipeline": "TextToVideoSDPipeline",
+        "description": "Zeroscope V2 - Text to Video",
+        "default_frames": 24,
+        "max_frames": 60,
+        "supports_text2video": True,
+    },
+    "cerspense/zeroscope_v2_XL": {
+        "type": "text2video",
+        "pipeline": "TextToVideoSDPipeline",
+        "description": "Zeroscope V2 XL - Text to Video (Higher Quality)",
+        "default_frames": 24,
+        "max_frames": 60,
+        "supports_text2video": True,
+    },
+}
+
+# CORS
+CORS_ORIGINS = ["*"]
+
+# Max upload size (50MB)
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024
