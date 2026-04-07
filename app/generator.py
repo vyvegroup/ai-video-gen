@@ -56,14 +56,52 @@ class VideoGenerator:
         allow_nsfw: bool = False,
         progress_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
+        """Generate a video (auto-creates video_id)."""
+        video_id = str(uuid.uuid4())[:8]
+        return self.generate_video_with_id(
+            video_id=video_id,
+            model_name=model_name,
+            prompt=prompt,
+            image_path=image_path,
+            negative_prompt=negative_prompt,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            fps=fps,
+            seed=seed,
+            motion_bucket_id=motion_bucket_id,
+            noise_aug_strength=noise_aug_strength,
+            cfg_scale=cfg_scale,
+            width=width,
+            height=height,
+            allow_nsfw=allow_nsfw,
+            progress_callback=progress_callback,
+        )
+
+    def generate_video_with_id(
+        self,
+        video_id: str,
+        model_name: str,
+        prompt: Optional[str] = None,
+        image_path: Optional[str] = None,
+        negative_prompt: str = "",
+        num_frames: int = DEFAULT_NUM_FRAMES,
+        num_inference_steps: int = DEFAULT_NUM_INFERENCE_STEPS,
+        fps: int = DEFAULT_FPS,
+        seed: int = DEFAULT_SEED,
+        motion_bucket_id: int = DEFAULT_MOTION_BUCKET_ID,
+        noise_aug_strength: float = DEFAULT_NOISE_AUG_STRENGTH,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
+        width: int = DEFAULT_WIDTH,
+        height: int = DEFAULT_HEIGHT,
+        allow_nsfw: bool = False,
+        progress_callback: Optional[Callable] = None,
+    ) -> Dict[str, Any]:
         """
-        Generate a video.
+        Generate a video with a pre-assigned video_id.
 
         Returns:
             Dict with video_id, output_path, and generation info.
         """
-        # Generate unique ID for this generation
-        video_id = str(uuid.uuid4())[:8]
         task_info = {
             "video_id": video_id,
             "status": "loading_model",

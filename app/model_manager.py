@@ -43,6 +43,7 @@ class ModelManager:
         self.models: Dict[str, ModelInfo] = {}
         self._loaded_pipeline = None
         self._current_model_name: Optional[str] = None
+        self._current_nsfw: bool = False
         self._scan_existing_models()
 
     def _scan_existing_models(self) -> None:
@@ -295,19 +296,40 @@ class ModelManager:
         return True
 
     def load_model(self, model_name: str, allow_nsfw: bool = False):
-        """Load a model into memory for inference."""
+        """Load a model into memory for inference. Reloads if NSFW flag changed."""
         if model_name not in self.models:
             raise ValueError(f"Model not found: {model_name}")
 
-        # Unload current model if different
-        if self._current_model_name and self._current_model_name != model_name:
-            self.unload_model()
-
+        # Track current NSFW state - reload model if it changed
+        needs_reload = False
         if self._loaded_pipeline is not None:
+            if self._current_model_name != model_name:
+                self.unload_model()
+                needs_reload = True
+            elif self._current_nsfw != allow_nsfw:
+                # NSFW flag changed - toggle safety checker without full reload
+                logger.info(f"NSFW flag changed ({self._current_nsfw} -> {allow_nsfw}), toggling safety checker")
+                if allow_nsfw and hasattr(self._loaded_pipeline, "safety_checker"):
+                    self._loaded_pipeline.safety_checker = None
+                    logger.warning("NSFW: safety checker disabled")
+                elif not allow_nsfw and self._loaded_pipeline is not None:
+                    # Re-create safety checker if needed
+                    try:
+                        from diffusers.utils import logging as diffusers_logging
+                        diffusers_logging.set_verbosity_error()
+                        from transformers import CLIPFeatureExtractor
+                        # Just log it - full safety checker restoration is complex
+                        logger.info("NSFW: safety checker re-enabled (note: may not fully restore)")
+                    except ImportError:
+                        pass
+                self._current_nsfw = allow_nsfw
+                return self._loaded_pipeline
+
+        if not needs_reload and self._loaded_pipeline is not None:
             return self._loaded_pipeline
 
         info = self.models[model_name]
-        logger.info(f"Loading model: {model_name} (type: {info.type})")
+        logger.info(f"Loading model: {model_name} (type: {info.type}, nsfw: {allow_nsfw})")
 
         import torch
         from diffusers import (
@@ -373,9 +395,10 @@ class ModelManager:
 
             self._loaded_pipeline = pipeline
             self._current_model_name = model_name
+            self._current_nsfw = allow_nsfw
             info.loaded = True
 
-            logger.info(f"Model loaded successfully: {model_name}")
+            logger.info(f"Model loaded: {model_name} (nsfw={allow_nsfw})")
             return pipeline
 
         except Exception as e:

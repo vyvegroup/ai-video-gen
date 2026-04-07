@@ -242,13 +242,18 @@ async def generate_video(
     height: int = Form(576),
     allow_nsfw: bool = Form(False),
 ):
-    """Start video generation (runs in background thread)."""
+    """Start video generation (runs in background thread). Returns video_id immediately."""
     import threading
+
+    # Pre-create video_id so we can return it to the client
+    import uuid
+    video_id = str(uuid.uuid4())[:8]
 
     # Run generation in background thread
     def run_generation():
         try:
-            video_generator.generate_video(
+            result = video_generator.generate_video_with_id(
+                video_id=video_id,
                 model_name=model_name,
                 prompt=prompt,
                 image_path=image_path,
@@ -273,7 +278,7 @@ async def generate_video(
     return {
         "success": True,
         "message": "Generation started",
-        "hint": "Use GET /api/generate/{video_id} to check status",
+        "video_id": video_id,
     }
 
 
