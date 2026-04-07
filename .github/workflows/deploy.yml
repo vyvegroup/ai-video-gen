@@ -1,14 +1,7 @@
 # =============================================================================
-# AI Video Generator - GitHub Actions Deployment (GitHub-Hosted Runner)
+# AI Video Generator - GitHub Actions (GitHub-Hosted Runner)
 # =============================================================================
 # Runs on ubuntu-latest (CPU only, 7GB RAM, 14GB disk)
-#
-# Optimizations:
-#   - CPU-only PyTorch (~200MB vs 2.5GB CUDA)
-#   - actions/cache for model persistence
-#   - CPU-optimized defaults
-#   - ngrok tunnel for public access
-#   - 6-hour max uptime
 #
 # SETUP:
 #   Secrets: NGROK_AUTH_TOKEN (required), HUGGINGFACE_TOKEN (optional)
@@ -53,7 +46,7 @@ on:
           - high
 
 env:
-  PORT: 8000
+  PORT: "8000"
   PYTHON_VERSION: '3.11'
   ALLOW_NSFW: ${{ github.event.inputs.allow_nsfw || 'true' }}
 
@@ -64,28 +57,33 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      # ---- Checkout ----
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
+      # ---- System deps ----
       - name: 🎬 Install system deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg jq
-          echo "ffmpeg: $(ffmpeg -version 2>&1 | head -1)"
-          echo "jq: $(jq --version)"
+          ffmpeg -version 2>&1 | head -1
+          jq --version
 
+      # ---- Python ----
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
+      # ---- Python deps ----
       - name: 📦 Install Python deps
         run: |
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-cpu.txt
           echo "Done: $(pip list | grep -cE 'torch|diffusers|fastapi') packages"
 
+      # ---- Model cache key ----
       - name: 🗂️ Cache key
         id: cache-key
         run: |
@@ -95,6 +93,7 @@ jobs:
           echo "safe_name=$SAFE" >> $GITHUB_OUTPUT
           echo "key=vid-${SAFE}-$(date +%Y-%m)" >> $GITHUB_OUTPUT
 
+      # ---- Cache model ----
       - name: 💾 Cache model
         uses: actions/cache@v4
         id: model-cache
@@ -104,6 +103,7 @@ jobs:
           restore-keys: |
             vid-${{ steps.cache-key.outputs.safe_name }}-
 
+      # ---- Download model ----
       - name: 🧠 Download model
         if: steps.model-cache.outputs.cache-hit != 'true'
         env:
@@ -114,15 +114,17 @@ jobs:
         run: |
           python scripts/download_model.py
           echo "Model size:"
-          du -sh models/* || echo "(empty)"
+          du -sh models/* 2>/dev/null || echo "(empty)"
 
+      # ---- Model from cache ----
       - name: ✅ Model from cache
         if: steps.model-cache.outputs.cache-hit == 'true'
         run: |
-          echo "Model loaded from cache:"
+          echo "Model from cache:"
           ls -la models/ | head -10
-          du -sh models/* || echo "(empty)"
+          du -sh models/* 2>/dev/null || echo "(empty)"
 
+      # ---- Resolution preset ----
       - name: ⚙️ Resolution preset
         id: preset
         run: |
@@ -132,6 +134,7 @@ jobs:
             high)   echo "w=576" >> $GITHUB_OUTPUT; echo "h=320" >> $GITHUB_OUTPUT; echo "f=16" >> $GITHUB_OUTPUT; echo "s=25" >> $GITHUB_OUTPUT ;;
           esac
 
+      # ---- Start server ----
       - name: 🌐 Start server
         env:
           ALLOW_NSFW: "true"
@@ -144,58 +147,62 @@ jobs:
           mkdir -p outputs uploads
 
           nohup python -m uvicorn app.main:app \
-            --host 0.0.0.0 --port $PORT \
+            --host 0.0.0.0 --port 8000 \
             --workers 1 --log-level info \
             > server.log 2>&1 &
 
           echo "Waiting for server..."
           for i in $(seq 1 60); do
-            if curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
-              echo "Server OK on port $PORT"
+            if curl -s http://localhost:8000/api/system/health > /dev/null 2>&1; then
+              echo "Server OK on port 8000"
               break
             fi
             sleep 2
           done
 
-          if ! curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1; then
+          if ! curl -s http://localhost:8000/api/system/health > /dev/null 2>&1; then
             echo "Server FAILED to start:"
             tail -30 server.log
             exit 1
           fi
 
+      # ---- Start ngrok ----
       - name: 🌍 Start ngrok
+        shell: bash
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
+          set +e
+
           # Install ngrok
           curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
           mv ngrok /usr/local/bin/ 2>/dev/null || true
 
           # Configure & start
           ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
-          ngrok http $PORT --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
+          ngrok http 8000 --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
 
-          # Wait for tunnel (60 seconds max)
+          # Wait for tunnel (up to 60 seconds)
           echo "Waiting for ngrok tunnel..."
           TUNNEL=""
           for i in $(seq 1 30); do
             sleep 2
-            TUNNEL=$(python3 scripts/get_tunnel_url.py 2>/dev/null) && break
-            # Also try with jq as fallback
-            TUNNEL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null) && [ "$TUNNEL" != "null" ] && break
+            TUNNEL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null)
+            if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then
+              break
+            fi
             TUNNEL=""
             echo "  retry $i/30..."
           done
 
           if [ -z "$TUNNEL" ]; then
             echo "=== NGROK FAILED ==="
-            echo "Log:"
             cat ngrok.log
-            echo ""
-            echo "Processes:"
-            ps aux | grep -i ngrok
+            ps aux | grep ngrok
             exit 1
           fi
+
+          set -e
 
           echo "PUBLIC_URL=$TUNNEL" >> $GITHUB_ENV
           echo "TUNNEL_URL=$TUNNEL" >> $GITHUB_ENV
@@ -204,6 +211,7 @@ jobs:
           echo "  LIVE: $TUNNEL"
           echo "============================================"
 
+      # ---- Deployment report ----
       - name: 📊 Report
         run: |
           echo "## 🎬 AI Video Generator — LIVE" >> $GITHUB_STEP_SUMMARY
@@ -225,34 +233,38 @@ jobs:
           echo "2. Models tab → Load model" >> $GITHUB_STEP_SUMMARY
           echo "3. Create tab → Generate ⚡" >> $GITHUB_STEP_SUMMARY
 
+      # ---- Keep alive (max 6h) ----
       - name: 💓 Keep alive
         timeout-minutes: 355
+        shell: bash
         run: |
-          echo "Server live: ${TUNNEL_URL}"
+          set +e
+          echo "Server live at: ${TUNNEL_URL}"
           N=0
           while [ $N -lt 210 ]; do
             N=$((N+1))
             sleep 90
             # Server health
-            curl -s http://localhost:$PORT/api/system/health > /dev/null 2>&1 || {
+            if ! curl -s http://localhost:8000/api/system/health > /dev/null 2>&1; then
               echo "Server down, restarting..."
-              pkill -f "uvicorn app.main" 2>/dev/null
+              pkill -f "uvicorn app.main" 2>/dev/null || true
               sleep 2
-              nohup python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info > server.log 2>&1 &
+              nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info > server.log 2>&1 &
               sleep 5
-            }
+            fi
             # Ngrok health
-            curl -s http://localhost:4040/api/tunnels > /dev/null 2>&1 || {
+            if ! curl -s http://localhost:4040/api/tunnels > /dev/null 2>&1; then
               echo "Ngrok down, restarting..."
-              pkill -f ngrok 2>/dev/null
+              pkill -f ngrok 2>/dev/null || true
               sleep 2
-              ngrok http $PORT --log=stdout > ngrok.log 2>&1 &
+              ngrok http 8000 --log=stdout > ngrok.log 2>&1 &
               sleep 5
-            }
+            fi
             echo "[$((N*90/60))m] alive"
           done
           echo "6h limit reached."
 
+      # ---- Cleanup ----
       - name: 🧹 Cleanup
         if: always()
         run: |
