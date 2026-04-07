@@ -506,13 +506,13 @@ async def startup_event():
     completed = state_manager.get_completed_generations()
     logger.info(f"  Found {len(completed)} completed generations in history")
 
-    # Configure video uploader if GitHub token is available
-    gh_token = os.getenv("GITHUB_TOKEN", "")
-    if gh_token:
-        video_uploader.configure(gh_token)
+    # Configure video uploader if GitHub PAT is available
+    gh_pat = os.getenv("GH_PAT", "")
+    if gh_pat:
+        video_uploader.configure(gh_pat)
         logger.info("  Video auto-upload to GitHub: configured")
     else:
-        logger.info("  Video auto-upload: not configured (set GITHUB_TOKEN env)")
+        logger.info("  Video auto-upload: not configured (set GH_PAT env)")
 
     # Chat model info
     chat_model_path = MODELS_DIR / "chat-model"

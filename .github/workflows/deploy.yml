@@ -181,6 +181,7 @@ jobs:
           DEFAULT_HEIGHT: ${{ steps.preset.outputs.h }}
           DEFAULT_NUM_INFERENCE_STEPS: ${{ steps.preset.outputs.s }}
           DEVICE: cpu
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           mkdir -p outputs uploads
 
