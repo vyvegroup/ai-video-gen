@@ -90,6 +90,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Download video model
+        env:
+          HF_HOME: /tmp/hf_cache
+          TRANSFORMERS_CACHE: /tmp/hf_cache
         run: |
           MODEL_ID="${{ inputs.model }}"
           MODEL_DIR="./models/$(echo $MODEL_ID | tr '/' '_')"
@@ -98,6 +101,8 @@ jobs:
             echo "Model already cached at $MODEL_DIR"
           else
             echo "Downloading model: $MODEL_ID"
+            echo "Disk free before download:"
+            df -h /tmp
             python -c "
           from huggingface_hub import snapshot_download
           import os
@@ -118,6 +123,9 @@ jobs:
           ls -la "$MODEL_DIR" | head -20
 
       - name: Download chat model (Qwen2.5-0.5B)
+        env:
+          HF_HOME: /tmp/hf_cache
+          TRANSFORMERS_CACHE: /tmp/hf_cache
         run: |
           CHAT_DIR="./models/chat-model"
           if [ -d "$CHAT_DIR" ] && [ -f "$CHAT_DIR/config.json" ]; then
@@ -250,9 +258,22 @@ jobs:
 
       - name: Keep alive
         run: |
+          # Use shell variables (not GITHUB_ENV) so PID updates work correctly
+          SERVER_PID=${{ env.SERVER_PID }}
+          NGROK_URL="${{ env.NGROK_URL }}"
+          DEVICE="cpu"
+          DEFAULT_NUM_FRAMES="${{ inputs.num_frames }}"
+          DEFAULT_NUM_INFERENCE_STEPS="${{ inputs.num_steps }}"
+          DEFAULT_WIDTH="${{ inputs.resolution }}"
+          DEFAULT_HEIGHT="${{ inputs.resolution }}"
+          ALLOW_NSFW="true"
+          HF_HOME="/tmp/hf_cache"
+
+          export DEVICE DEFAULT_NUM_FRAMES DEFAULT_NUM_INFERENCE_STEPS DEFAULT_WIDTH DEFAULT_HEIGHT ALLOW_NSFW HF_HOME
+
           echo "Keeping server alive for 6 hours..."
-          echo "Server PID: ${{ env.SERVER_PID }}"
-          echo "URL: ${{ env.NGROK_URL }}"
+          echo "Server PID: $SERVER_PID"
+          echo "URL: $NGROK_URL"
 
           # Check every 60 seconds
           TIMEOUT=21600  # 6 hours
@@ -262,7 +283,7 @@ jobs:
             ELAPSED=$((ELAPSED + 60))
 
             # Check if server is still running
-            if ! kill -0 ${{ env.SERVER_PID }} 2>/dev/null; then
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
               echo "Server process died at $((ELAPSED/60)) minutes"
               exit 1
             fi
@@ -270,16 +291,16 @@ jobs:
             # Local health check
             if ! curl -sf http://localhost:8000/api/system/health > /dev/null 2>&1; then
               echo "Health check failed at $((ELAPSED/60)) minutes, restarting..."
-              kill ${{ env.SERVER_PID }} 2>/dev/null || true
+              kill $SERVER_PID 2>/dev/null || true
               sleep 2
               python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
-              NEW_PID=$!
-              echo "SERVER_PID=$NEW_PID" >> $GITHUB_ENV
+              SERVER_PID=$!
+              echo "Restarted server with new PID: $SERVER_PID"
               sleep 5
             fi
 
             # Check ngrok tunnel is still alive
-            if ! curl -sf -H "ngrok-skip-browser-warning: 1" "${{ env.NGROK_URL }}/api/system/health" > /dev/null 2>&1; then
+            if ! curl -sf -H "ngrok-skip-browser-warning: 1" "$NGROK_URL/api/system/health" > /dev/null 2>&1; then
               echo "ngrok tunnel down at $((ELAPSED/60)) minutes, reconnecting..."
               python -c "
           from pyngrok import ngrok
@@ -298,15 +319,20 @@ jobs:
           tunnel = ngrok.connect(8000, bind_tls=True)
           url = tunnel.public_url
           print(f'New ngrok URL: {url}')
-          with open(os.environ['GITHUB_ENV'], 'a') as f:
-              f.write(f'NGROK_URL={url}\n')
+          # Write to file and read back (shell variable update)
+          with open('/tmp/ngrok_url.txt', 'w') as f:
+              f.write(url)
           "
               sleep 3
-              echo "ngrok reconnected"
+              # Read new URL if reconnected
+              if [ -f /tmp/ngrok_url.txt ]; then
+                NGROK_URL=$(cat /tmp/ngrok_url.txt)
+                echo "ngrok reconnected: $NGROK_URL"
+              fi
             fi
 
             if [ $((ELAPSED % 300)) -eq 0 ]; then
-              echo "Still alive at $((ELAPSED/60)) minutes | URL: ${{ env.NGROK_URL }}"
+              echo "Still alive at $((ELAPSED/60)) minutes | URL: $NGROK_URL | PID: $SERVER_PID"
             fi
           done
 

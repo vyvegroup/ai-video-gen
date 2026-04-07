@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from contextlib import asynccontextmanager
+
 from fastapi import (
     FastAPI,
     File,
@@ -57,10 +59,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Create FastAPI app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager (replaces deprecated on_event startup)."""
+    logger.info("=" * 60)
+    logger.info("  🎬 AI Video Generator v2.0 Starting...")
+    logger.info("=" * 60)
+
+    import torch
+    if torch.cuda.is_available():
+        logger.info(f"  GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        logger.warning("  CPU-only mode (no GPU)")
+
+    # Restore active generations
+    active = state_manager.get_active_generations()
+    if active:
+        logger.info(f"  Restoring {len(active)} active generations from state")
+        for gen in active:
+            logger.info(f"    - {gen['video_id']} ({gen['status']})")
+
+    completed = state_manager.get_completed_generations()
+    logger.info(f"  Found {len(completed)} completed generations in history")
+
+    # Configure video uploader if GitHub PAT is available
+    gh_pat = os.getenv("GH_PAT", "")
+    if gh_pat:
+        video_uploader.configure(gh_pat)
+        logger.info("  Video auto-upload to GitHub: configured")
+    else:
+        logger.info("  Video auto-upload: not configured (set GH_PAT env)")
+
+    # Chat model info
+    chat_model_path = MODELS_DIR / "chat-model"
+    if chat_model_path.exists():
+        logger.info("  Chat model: Qwen2.5-0.5B-Instruct (local, ready)")
+    else:
+        logger.info("  Chat model: will download on first use")
+
+    logger.info("=" * 60)
+    yield  # App runs here
+    # Shutdown (if needed in future)
+    logger.info("Shutting down...")
+
 app = FastAPI(
     title="AI Video Generator",
     description="Self-hosted AI Video Generation with local model inference + AI Chat",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # CORS
@@ -498,51 +544,6 @@ async def system_info():
 @app.get("/api/system/health")
 async def health_check():
     return {"status": "ok", "service": "AI Video Generator v2.0"}
-
-
-# ============================================================
-# STARTUP
-# ============================================================
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("=" * 60)
-    logger.info("  🎬 AI Video Generator v2.0 Starting...")
-    logger.info("=" * 60)
-
-    import torch
-    if torch.cuda.is_available():
-        logger.info(f"  GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        logger.warning("  CPU-only mode (no GPU)")
-
-    # Restore active generations
-    active = state_manager.get_active_generations()
-    if active:
-        logger.info(f"  Restoring {len(active)} active generations from state")
-        for gen in active:
-            logger.info(f"    - {gen['video_id']} ({gen['status']})")
-
-    completed = state_manager.get_completed_generations()
-    logger.info(f"  Found {len(completed)} completed generations in history")
-
-    # Configure video uploader if GitHub PAT is available
-    gh_pat = os.getenv("GH_PAT", "")
-    if gh_pat:
-        video_uploader.configure(gh_pat)
-        logger.info("  Video auto-upload to GitHub: configured")
-    else:
-        logger.info("  Video auto-upload: not configured (set GH_PAT env)")
-
-    # Chat model info
-    chat_model_path = MODELS_DIR / "chat-model"
-    if chat_model_path.exists():
-        logger.info("  Chat model: Qwen2.5-0.5B-Instruct (local, ready)")
-    else:
-        logger.info("  Chat model: will download on first use")
-
-    logger.info("=" * 60)
-
 
 if __name__ == "__main__":
     import uvicorn

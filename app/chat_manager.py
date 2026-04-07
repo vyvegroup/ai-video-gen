@@ -319,7 +319,7 @@ Rules:
 
         # Generate response in thread pool to avoid blocking
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         ai_response = await loop.run_in_executor(None, self._generate_response, messages)
 
         # Add assistant response

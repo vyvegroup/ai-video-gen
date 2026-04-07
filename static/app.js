@@ -476,7 +476,7 @@
     state.models.forEach(m => {
       const name = m.name || m.id || m;
       const type = m.type || 'unknown';
-      const size = m.size ? formatBytes(m.size) : 'Unknown';
+      const size = m.size_mb ? `${Number(m.size_mb).toFixed(1)} MB` : (m.size ? formatBytes(m.size) : 'Unknown');
       const source = m.source || 'huggingface';
       const loaded = m.loaded || state.loadedModel === name;
 
