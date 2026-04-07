@@ -357,18 +357,21 @@ class ModelManager:
                     info.path,
                     torch_dtype=dtype,
                     variant="fp16" if device == "cuda" else None,
+                    low_cpu_mem_usage=True,
                 )
             elif info.type == "text2video":
                 pipeline = TextToVideoSDPipeline.from_pretrained(
                     info.path,
                     torch_dtype=dtype,
                     variant="fp16" if device == "cuda" else None,
+                    low_cpu_mem_usage=True,
                 )
             else:
                 # Try auto-detection via DiffusionPipeline
                 pipeline = DiffusionPipeline.from_pretrained(
                     info.path,
                     torch_dtype=dtype,
+                    low_cpu_mem_usage=True,
                 )
 
             # Disable safety checker if NSFW allowed
@@ -387,11 +390,15 @@ class ModelManager:
                         pass
             else:
                 # CPU-specific optimizations
-                # Set attention slicing to reduce memory usage on CPU
                 pipeline.enable_attention_slicing("max")
                 if hasattr(pipeline, 'enable_vae_slicing'):
                     pipeline.enable_vae_slicing()
-                logger.info("CPU optimizations enabled: attention_slicing, vae_slicing")
+                if hasattr(pipeline, 'enable_sequential_cpu_offload'):
+                    try:
+                        pipeline.enable_sequential_cpu_offload()
+                    except Exception:
+                        pass
+                logger.info("CPU optimizations enabled: attention_slicing, vae_slicing, sequential_offload")
 
             self._loaded_pipeline = pipeline
             self._current_model_name = model_name
@@ -402,7 +409,14 @@ class ModelManager:
             return pipeline
 
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
+            logger.error(f"Failed to load model: {e}", exc_info=True)
+            # Clean up partially loaded pipeline
+            if pipeline is not None:
+                del pipeline
+                pipeline = None
+            torch.cuda.empty_cache()
+            self._loaded_pipeline = None
+            self._current_model_name = None
             raise RuntimeError(f"Failed to load model {model_name}: {e}")
 
     def unload_model(self) -> None:

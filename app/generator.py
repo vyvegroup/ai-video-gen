@@ -127,10 +127,10 @@ class VideoGenerator:
 
             # Step 2: Validate inputs
             if model_info and model_info.type == "svd" and not image_path:
-                raise ValueError("Image-to-Video models require an input image")
+                raise ValueError("Image-to-Video models require an input image. Switch to a Text-to-Video model like Zeroscope for text prompt generation.")
 
             if model_info and model_info.type == "text2video" and not prompt:
-                raise ValueError("Text-to-Video models require a text prompt")
+                raise ValueError("Text-to-Video models require a text prompt. Switch to an Image-to-Video model like SVD for image input.")
 
             # Step 3: Prepare inputs
             update_progress(10, "Preparing inputs...")
@@ -263,7 +263,9 @@ class VideoGenerator:
                 })
 
         except Exception as e:
+            import traceback
             logger.error(f"Generation failed for {video_id}: {e}")
+            logger.error(traceback.format_exc())
             task_info.update({
                 "status": "error",
                 "progress": task_info.get("progress", 0),

@@ -1,360 +1,253 @@
-# =============================================================================
-# AI Video Generator - GitHub Actions (GitHub-Hosted Runner)
-# =============================================================================
-# Runs on ubuntu-latest (CPU only, 7GB RAM, 14GB disk)
-#
-# SETUP:
-#   Secrets: NGROK_AUTH_TOKEN (required), HUGGINGFACE_TOKEN (optional)
-#   Variables: DEFAULT_MODEL (optional)
-# =============================================================================
-
-name: 🎬 Deploy AI Video Generator
+name: Deploy AI Video Gen
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
   workflow_dispatch:
     inputs:
-      model_url:
-        description: 'Model (HuggingFace ID or direct URL like https://civarchive.com/...)'
-        required: false
-        default: 'cerspense/zeroscope_v2_576w'
-      model_source:
-        description: 'Model source'
-        required: false
-        default: 'huggingface'
-        type: choice
-        options:
-          - huggingface
-          - url
-      allow_nsfw:
-        description: 'Allow NSFW content'
-        required: false
-        default: true
-        type: boolean
       resolution:
         description: 'Resolution preset'
         required: false
-        default: 'low'
+        default: '256'
         type: choice
         options:
-          - low
-          - medium
-          - high
+          - '256'
+          - '512'
+          - '576'
+      num_frames:
+        description: 'Number of frames'
+        required: false
+        default: '8'
+        type: choice
+        options:
+          - '4'
+          - '8'
+          - '14'
+          - '16'
+      num_steps:
+        description: 'Inference steps'
+        required: false
+        default: '10'
+        type: choice
+        options:
+          - '5'
+          - '10'
+          - '15'
+          - '20'
+      model:
+        description: 'Model to download'
+        required: false
+        default: 'cerspense/zeroscope_v2_576w'
+        type: choice
+        options:
+          - 'cerspense/zeroscope_v2_576w'
+          - 'cerspense/zeroscope_v2_XL'
+          - 'stabilityai/stable-video-diffusion-img2vid-xt'
+          - 'stabilityai/stable-video-diffusion-img2vid'
 
 env:
-  PORT: "8000"
-  PYTHON_VERSION: '3.11'
-  ALLOW_NSFW: ${{ github.event.inputs.allow_nsfw || 'true' }}
+  NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+  GH_PAT: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   deploy:
-    name: 🚀 Deploy (GitHub Runner)
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      # ---- Checkout ----
-      - name: 📦 Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # ---- System deps ----
-      - name: 🎬 Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg jq
-          ffmpeg -version 2>&1 | head -1
-          jq --version
-
-      # ---- Python ----
-      - name: 🐍 Setup Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          python-version: '3.11'
 
-      # ---- Python deps ----
-      - name: 📦 Install Python deps
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-cpu-v3-${{ hashFiles('requirements-cpu.txt') }}
+          restore-keys: pip-cpu-v3-
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ./models
+          key: models-${{ inputs.model }}-v2
+          restore-keys: |
+            models-${{ inputs.model }}-
+            models-
+
+      - name: Install PyTorch CPU
         run: |
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements-cpu.txt
-          echo "Done: $(pip list | grep -cE 'torch|diffusers|fastapi') packages"
+          echo "PyTorch CPU installed"
+          python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 
-      # ---- Chat model cache ----
-      - name: 💬 Cache chat model
-        uses: actions/cache@v4
-        id: chat-model-cache
-        with:
-          path: models/chat-model/
-          key: chat-qwen-0.5b-instruct-v1
+      - name: Install dependencies
+        run: pip install -r requirements-cpu.txt
 
-      # ---- Download chat model ----
-      - name: 💬 Download chat model (Qwen2.5-0.5B-Instruct)
-        if: steps.chat-model-cache.outputs.cache-hit != 'true'
-        env:
-          HF_HOME: /tmp/hf_cache
-          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Download video model
         run: |
-          echo "Downloading Qwen2.5-0.5B-Instruct for AI chat..."
-          python -c "
+          MODEL_ID="${{ inputs.model }}"
+          MODEL_DIR="./models/$(echo $MODEL_ID | tr '/' '_')"
+
+          if [ -d "$MODEL_DIR" ] && [ -f "$MODEL_DIR/model_index.json" ]; then
+            echo "Model already cached at $MODEL_DIR"
+          else
+            echo "Downloading model: $MODEL_ID"
+            python -c "
           from huggingface_hub import snapshot_download
           import os
-          os.makedirs('models/chat-model', exist_ok=True)
+          model_id = '$MODEL_ID'
+          safe_name = model_id.replace('/', '_')
+          path = f'./models/{safe_name}'
+          os.makedirs(path, exist_ok=True)
           snapshot_download(
-              'Qwen/Qwen2.5-0.5B-Instruct',
-              local_dir='models/chat-model',
+              repo_id=model_id,
+              local_dir=path,
               local_dir_use_symlinks=False,
           )
-          print('Chat model downloaded!')
-          print('Size:')
-          import subprocess
-          subprocess.run(['du', '-sh', 'models/chat-model'])
+          print(f'Model downloaded to {path}')
           "
+          fi
 
-      # ---- Chat model from cache ----
-      - name: ✅ Chat model from cache
-        if: steps.chat-model-cache.outputs.cache-hit == 'true'
+          echo "Model directory contents:"
+          ls -la "$MODEL_DIR" | head -20
+
+      - name: Download chat model (Qwen2.5-0.5B)
         run: |
-          echo "Chat model from cache:"
-          du -sh models/chat-model/ 2>/dev/null || echo "(empty)"
+          CHAT_DIR="./models/chat-model"
+          if [ -d "$CHAT_DIR" ] && [ -f "$CHAT_DIR/config.json" ]; then
+            echo "Chat model already cached"
+          else
+            echo "Downloading Qwen2.5-0.5B-Instruct..."
+            python -c "
+          from huggingface_hub import snapshot_download
+          import os
+          path = './models/chat-model'
+          os.makedirs(path, exist_ok=True)
+          snapshot_download(
+              repo_id='Qwen/Qwen2.5-0.5B-Instruct',
+              local_dir=path,
+              local_dir_use_symlinks=False,
+          )
+          print('Chat model downloaded')
+          "
+          fi
 
-      # ---- Model cache key ----
-      - name: 🗂️ Cache key
-        id: cache-key
-        run: |
-          MID="${{ github.event.inputs.model_url || vars.DEFAULT_MODEL || 'cerspense/zeroscope_v2_576w' }}"
-          SAFE=$(echo "$MID" | sed 's|/|_|g; s|https://||g; s|http://||g; s|:||g')
-          echo "model_id=$MID" >> $GITHUB_OUTPUT
-          echo "safe_name=$SAFE" >> $GITHUB_OUTPUT
-          echo "key=vid-${SAFE}-$(date +%Y-%m)" >> $GITHUB_OUTPUT
+      - name: Create state directories
+        run: mkdir -p ./state/chats ./outputs ./uploads
 
-      # ---- Cache model ----
-      - name: 💾 Cache model
-        uses: actions/cache@v4
-        id: model-cache
-        with:
-          path: models/
-          key: ${{ steps.cache-key.outputs.key }}
-          restore-keys: |
-            vid-${{ steps.cache-key.outputs.safe_name }}-
-
-      # ---- Download model ----
-      - name: 🧠 Download model
-        if: steps.model-cache.outputs.cache-hit != 'true'
+      - name: Start FastAPI server
         env:
-          MODEL_ID: ${{ steps.cache-key.outputs.model_id }}
-          MODEL_SOURCE: ${{ github.event.inputs.model_source || 'huggingface' }}
-          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          DEVICE: cpu
+          DEFAULT_NUM_FRAMES: ${{ inputs.num_frames }}
+          DEFAULT_NUM_INFERENCE_STEPS: ${{ inputs.num_steps }}
+          DEFAULT_WIDTH: ${{ inputs.resolution }}
+          DEFAULT_HEIGHT: ${{ inputs.resolution }}
+          ALLOW_NSFW: "true"
           HF_HOME: /tmp/hf_cache
         run: |
-          python scripts/download_model.py
-          echo "Model size:"
-          du -sh models/* 2>/dev/null || echo "(empty)"
+          echo "Starting server on port 8000..."
+          python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          SERVER_PID=$!
+          echo "Server PID: $SERVER_PID"
 
-      # ---- Model from cache ----
-      - name: ✅ Model from cache
-        if: steps.model-cache.outputs.cache-hit == 'true'
-        run: |
-          echo "Model from cache:"
-          ls -la models/ | head -10
-          du -sh models/* 2>/dev/null || echo "(empty)"
-
-      # ---- Resolution preset ----
-      - name: ⚙️ Resolution preset
-        id: preset
-        run: |
-          case "${{ github.event.inputs.resolution || 'low' }}" in
-            low)    echo "w=256" >> $GITHUB_OUTPUT; echo "h=256" >> $GITHUB_OUTPUT; echo "f=8"  >> $GITHUB_OUTPUT; echo "s=15" >> $GITHUB_OUTPUT ;;
-            medium) echo "w=384" >> $GITHUB_OUTPUT; echo "h=384" >> $GITHUB_OUTPUT; echo "f=12" >> $GITHUB_OUTPUT; echo "s=20" >> $GITHUB_OUTPUT ;;
-            high)   echo "w=576" >> $GITHUB_OUTPUT; echo "h=320" >> $GITHUB_OUTPUT; echo "f=16" >> $GITHUB_OUTPUT; echo "s=25" >> $GITHUB_OUTPUT ;;
-          esac
-
-      # ---- Start server ----
-      - name: 🌐 Start server
-        env:
-          ALLOW_NSFW: "true"
-          DEFAULT_NUM_FRAMES: ${{ steps.preset.outputs.f }}
-          DEFAULT_WIDTH: ${{ steps.preset.outputs.w }}
-          DEFAULT_HEIGHT: ${{ steps.preset.outputs.h }}
-          DEFAULT_NUM_INFERENCE_STEPS: ${{ steps.preset.outputs.s }}
-          DEVICE: cpu
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          mkdir -p outputs uploads
-
-          nohup python -m uvicorn app.main:app \
-            --host 0.0.0.0 --port 8000 \
-            --workers 1 --log-level info \
-            > server.log 2>&1 &
-
+          # Wait for server to be ready
           echo "Waiting for server..."
           for i in $(seq 1 60); do
             if curl -s http://localhost:8000/api/system/health > /dev/null 2>&1; then
-              echo "Server OK on port 8000"
+              echo "Server is ready!"
               break
             fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "Server crashed! Checking logs..."
+              wait $SERVER_PID 2>/dev/null || true
+              exit 1
+            fi
+            echo "  Waiting... ($i/60)"
             sleep 2
           done
 
+          # Final check
           if ! curl -s http://localhost:8000/api/system/health > /dev/null 2>&1; then
-            echo "Server FAILED to start:"
-            tail -30 server.log
+            echo "Server failed to start"
             exit 1
           fi
 
-      # ---- Start ngrok ----
-      - name: 🌍 Start ngrok
-        shell: bash
-        env:
-          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+
+      - name: Start ngrok tunnel
         run: |
-          set +e
+          pip install pyngrok
+          python -c "
+          from pyngrok import ngrok
+          import json, os
 
-          # Install ngrok via snap (most reliable on Ubuntu)
-          which ngrok > /dev/null 2>&1 || {
-            echo "Installing ngrok..."
-            sudo snap install ngrok 2>/dev/null || {
-              # Fallback: download binary
-              curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz -C /tmp
-              export PATH="/tmp:$PATH"
-              chmod +x /tmp/ngrok
-            }
-          }
+          token = os.environ.get('NGROK_AUTH_TOKEN', '')
+          if token:
+              ngrok.set_auth_token(token)
 
-          # Verify ngrok is available
-          which ngrok
-          ngrok version
+          tunnel = ngrok.connect(8000, bind_tls=True)
+          url = tunnel.public_url
+          print(f'NGROK_URL={url}' )
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'NGROK_URL={url}\n')
+          print(f'Public URL: {url}')
+          "
 
-          # Verify server is listening
-          curl -s http://localhost:8000/api/system/health > /dev/null 2>&1
-          if [ $? -ne 0 ]; then
-            echo "ERROR: Server not listening on port 8000!"
-            exit 1
-          fi
-          echo "Server confirmed on port 8000"
+      - name: Show access URL
+        run: |
+          echo "=============================================="
+          echo "  🎬 AI Video Generator is LIVE"
+          echo "=============================================="
+          echo ""
+          echo "  🌐 URL: ${{ env.NGROK_URL }}"
+          echo ""
+          echo "  ⚙️  Config:"
+          echo "     Resolution: ${{ inputs.resolution }}x${{ inputs.resolution }}"
+          echo "     Frames: ${{ inputs.num_frames }}"
+          echo "     Steps: ${{ inputs.num_steps }}"
+          echo "     Model: ${{ inputs.model }}"
+          echo ""
+          echo "=============================================="
 
-          # Configure ngrok
-          ngrok config add-authtoken "$NGROK_AUTH_TOKEN" 2>&1
+      - name: Keep alive
+        run: |
+          echo "Keeping server alive for 6 hours..."
+          echo "Server PID: ${{ env.SERVER_PID }}"
+          echo "URL: ${{ env.NGROK_URL }}"
 
-          # Start ngrok
-          echo "Starting ngrok http 8000..."
-          ngrok http 8000 --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
-          NGROK_PID=$!
-          echo "ngrok PID: $NGROK_PID"
+          # Check every 60 seconds
+          TIMEOUT=21600  # 6 hours
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            sleep 60
+            ELAPSED=$((ELAPSED + 60))
 
-          # Wait 5 seconds for ngrok to initialize
-          sleep 5
-
-          # Verify ngrok process is running
-          if ! kill -0 $NGROK_PID 2>/dev/null; then
-            echo "ERROR: ngrok process died immediately!"
-            echo "=== ngrok log ==="
-            cat ngrok.log
-            exit 1
-          fi
-          echo "ngrok process is running"
-
-          # Wait for tunnel
-          echo "Waiting for tunnel URL..."
-          TUNNEL=""
-          for i in $(seq 1 30); do
-            TUNNEL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null)
-            if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then
-              echo "GOT IT: $TUNNEL"
-              break
-            fi
-            TUNNEL=""
-
-            # Check ngrok still alive
-            if ! kill -0 $NGROK_PID 2>/dev/null; then
-              echo "ngrok died at iteration $i"
-              cat ngrok.log
+            # Check if server is still running
+            if ! kill -0 ${{ env.SERVER_PID }} 2>/dev/null; then
+              echo "Server process died at $((ELAPSED/60)) minutes"
               exit 1
             fi
 
-            echo "  waiting... ($i/30)"
-            sleep 2
-          done
-
-          set -e
-
-          if [ -z "$TUNNEL" ]; then
-            echo "=== NGROK TUNNEL FAILED ==="
-            echo "=== ngrok.log ==="
-            cat ngrok.log
-            echo "=== processes ==="
-            ps aux | grep ngrok || true
-            echo "=== port check ==="
-            ss -tlnp | grep -E '8000|4040' || true
-            exit 1
-          fi
-
-          echo "PUBLIC_URL=$TUNNEL" >> $GITHUB_ENV
-          echo "TUNNEL_URL=$TUNNEL" >> $GITHUB_ENV
-          echo ""
-          echo "============================================"
-          echo "  LIVE: $TUNNEL"
-          echo "============================================"
-
-      # ---- Deployment report ----
-      - name: 📊 Report
-        run: |
-          echo "## 🎬 AI Video Generator — LIVE" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🌍 URL" >> $GITHUB_STEP_SUMMARY
-          echo "**${TUNNEL_URL}**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🖥️ | CPU-only GitHub runner |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🧠 | ${{ steps.cache-key.outputs.model_id }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 📐 | ${{ steps.preset.outputs.w }}×${{ steps.preset.outputs.h }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🎞️ | ${{ steps.preset.outputs.f }} frames |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔁 | ${{ steps.preset.outputs.s }} steps |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔞 | NSFW $ALLOW_NSFW |" >> $GITHUB_STEP_SUMMARY
-          echo "| ⏱️ | Max 6h uptime |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. Open the URL above" >> $GITHUB_STEP_SUMMARY
-          echo "2. Models tab → Load model" >> $GITHUB_STEP_SUMMARY
-          echo "3. Create tab → Generate ⚡" >> $GITHUB_STEP_SUMMARY
-
-      # ---- Keep alive (max 6h) ----
-      - name: 💓 Keep alive
-        timeout-minutes: 355
-        shell: bash
-        run: |
-          set +e
-          echo "Server live at: ${TUNNEL_URL}"
-          N=0
-          while [ $N -lt 210 ]; do
-            N=$((N+1))
-            sleep 90
-            # Server health
-            if ! curl -s http://localhost:8000/api/system/health > /dev/null 2>&1; then
-              echo "Server down, restarting..."
-              pkill -f "uvicorn app.main" 2>/dev/null || true
+            # Health check
+            if ! curl -sf http://localhost:8000/api/system/health > /dev/null 2>&1; then
+              echo "Health check failed at $((ELAPSED/60)) minutes, restarting..."
+              kill ${{ env.SERVER_PID }} 2>/dev/null || true
               sleep 2
-              nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info > server.log 2>&1 &
+              python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+              NEW_PID=$!
+              echo "SERVER_PID=$NEW_PID" >> $GITHUB_ENV
               sleep 5
             fi
-            # Ngrok health
-            if ! curl -s http://localhost:4040/api/tunnels > /dev/null 2>&1; then
-              echo "Ngrok down, restarting..."
-              pkill -f ngrok 2>/dev/null || true
-              sleep 2
-              ngrok http 8000 --log=stdout > ngrok.log 2>&1 &
-              sleep 5
-            fi
-            echo "[$((N*90/60))m] alive"
-          done
-          echo "6h limit reached."
 
-      # ---- Cleanup ----
-      - name: 🧹 Cleanup
-        if: always()
-        run: |
-          pkill -f "uvicorn app.main" 2>/dev/null || true
-          pkill -f ngrok 2>/dev/null || true
+            if [ $((ELAPSED % 300)) -eq 0 ]; then
+              echo "Still alive at $((ELAPSED/60)) minutes | URL: ${{ env.NGROK_URL }}"
+            fi
+          done
+
+          echo "Timeout reached (6 hours)"

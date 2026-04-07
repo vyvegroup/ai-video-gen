@@ -26,10 +26,17 @@ DTYPE = os.getenv("DTYPE", "auto")  # auto, fp16, bf16, fp32
 
 # Detect if we're on a CPU-only environment (like GitHub Actions runner)
 def _is_cpu_only():
-    import torch
-    return not torch.cuda.is_available()
+    try:
+        import torch
+        return not torch.cuda.is_available()
+    except ImportError:
+        return True
 
-_CPU_ONLY = _is_cpu_only() if 'torch' in dir() else os.getenv("DEVICE", "auto") == "cpu"
+try:
+    _CPU_ONLY = _is_cpu_only()
+except Exception:
+    # If torch not installed yet, check env var
+    _CPU_ONLY = os.getenv("DEVICE", "auto") == "cpu"
 
 # Generation defaults - CPU-optimized when no GPU
 if _CPU_ONLY:

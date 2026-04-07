@@ -756,14 +756,14 @@
         try {
           const data = JSON.parse(event.data);
           if (data.progress !== undefined) {
-            const step = data.step || data.current_step || '';
-            updateProgress(data.progress, step);
+            const stepText = data.message || data.step || data.current_step || '';
+            updateProgress(data.progress, stepText);
           }
           if (data.status === 'completed') {
             onGenerationComplete(data, videoId);
           }
           if (data.status === 'failed' || data.status === 'error') {
-            onGenerationFailed(data.error || 'Generation failed');
+            onGenerationFailed(data.message || data.error || 'Generation failed');
           }
         } catch (_) { /* ignore parse errors */ }
       };
@@ -791,13 +791,14 @@
       try {
         const data = await apiFetch(`/api/generate/${videoId}`);
         if (data.progress !== undefined) {
-          updateProgress(data.progress, data.step || data.current_step || '');
+          const stepText = data.message || data.step || data.current_step || '';
+          updateProgress(data.progress, stepText);
         }
         if (data.status === 'completed') {
           onGenerationComplete(data, videoId);
         }
         if (data.status === 'failed' || data.status === 'error') {
-          onGenerationFailed(data.error || 'Generation failed');
+          onGenerationFailed(data.message || data.error || 'Generation failed');
         }
       } catch (err) {
         // Don't stop polling on temporary errors
