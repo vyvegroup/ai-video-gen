@@ -190,55 +190,74 @@ jobs:
 
       - name: Start ngrok tunnel
         run: |
-          pip install pyngrok
-          python -c "
-          from pyngrok import ngrok
-          import json, os, time
+          # Download ngrok binary directly (more reliable than pyngrok)
+          curl -sL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o /tmp/ngrok.tgz
+          tar -xzf /tmp/ngrok.tgz -C /tmp/
+          chmod +x /tmp/ngrok
+          echo "ngrok binary downloaded"
 
-          token = os.environ.get('NGROK_AUTH_TOKEN', '')
-          if token:
-              ngrok.set_auth_token(token)
-              print('Using ngrok auth token (free account)')
-          else:
-              print('WARNING: No NGROK_AUTH_TOKEN set! Using unauthenticated ngrok.')
+          # Configure auth token if available
+          if [ -n "$NGROK_AUTH_TOKEN" ]; then
+            /tmp/ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
+            echo "ngrok auth token configured"
+          else
+            echo "WARNING: No NGROK_AUTH_TOKEN set! Tunnel may show warning page."
+          fi
 
-          # Start tunnel with options to handle free tier
-          tunnel = ngrok.connect(
-              8000,
-              bind_tls=True,
-              options={
-                  'request_header_add': 'ngrok-skip-browser-warning: 1',
-                  'compression': False,
-              }
-          )
-          url = tunnel.public_url
-          print(f'NGROK_URL={url}')
+          # Start ngrok in background
+          /tmp/ngrok http 8000 --log=stdout --log-format=logfmt > /tmp/ngrok.log 2>&1 &
+          NGROK_PID=$!
+          echo "ngrok started with PID: $NGROK_PID"
 
-          # Save URL to env
-          with open(os.environ['GITHUB_ENV'], 'a') as f:
-              f.write(f'NGROK_URL={url}\n')
-              f.write(f'NGROK_TUNNEL_ID={tunnel.api_request.public_url.split(\"//\")[1].split(\".\")[0]}\n')
+          # Wait for tunnel to establish
+          sleep 3
 
-          print(f'Public URL: {url}')
+          # Get the public URL from ngrok API
+          for attempt in $(seq 1 15); do
+            NGROK_URL=$(curl -sf http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              tunnels = data.get('tunnels', [])
+              for t in tunnels:
+                  if t.get('public_url', '').startswith('https'):
+                      print(t['public_url'])
+                      break
+          except:
+              pass
+          " 2>/dev/null)
 
-          # Verify tunnel works
-          import urllib.request
-          for attempt in range(10):
-              try:
-                  req = urllib.request.Request(
-                      f'{url}/api/system/health',
-                      headers={'ngrok-skip-browser-warning': '1'}
-                  )
-                  resp = urllib.request.urlopen(req, timeout=10)
-                  data = resp.read().decode()
-                  print(f'Tunnel verified: {data}')
-                  break
-              except Exception as e:
-                  print(f'Tunnel check {attempt+1}/10 failed: {e}')
-                  time.sleep(2)
-          else:
-              print('WARNING: Could not verify tunnel')
-          "
+            if [ -n "$NGROK_URL" ]; then
+              echo "ngrok tunnel established: $NGROK_URL"
+              break
+            fi
+            echo "  Waiting for tunnel... ($attempt/15)"
+            sleep 2
+          done
+
+          if [ -z "$NGROK_URL" ]; then
+            echo "ERROR: ngrok tunnel failed to start!"
+            echo "--- ngrok log ---"
+            cat /tmp/ngrok.log | tail -30
+            exit 1
+          fi
+
+          # Save URL
+          echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
+
+          # Verify tunnel actually works (through ngrok)
+          for attempt in $(seq 1 10); do
+            HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -H "ngrok-skip-browser-warning: 1" "$NGROK_URL/api/system/health" 2>/dev/null)
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Tunnel verified OK (HTTP 200)"
+              break
+            fi
+            echo "  Tunnel verification attempt $attempt/10 (HTTP $HTTP_CODE)"
+            sleep 2
+          done
+
+          echo "--- ngrok log (last 10 lines) ---"
+          tail -10 /tmp/ngrok.log
 
       - name: Show access URL
         run: |
@@ -302,32 +321,29 @@ jobs:
             # Check ngrok tunnel is still alive
             if ! curl -sf -H "ngrok-skip-browser-warning: 1" "$NGROK_URL/api/system/health" > /dev/null 2>&1; then
               echo "ngrok tunnel down at $((ELAPSED/60)) minutes, reconnecting..."
-              python -c "
-          from pyngrok import ngrok
-          import os
-          token = os.environ.get('NGROK_AUTH_TOKEN', '')
-          if token:
-              ngrok.set_auth_token(token)
-          # Kill all existing tunnels
-          tunnels = ngrok.get_tunnels()
-          for t in tunnels:
-              try:
-                  ngrok.disconnect(t.public_url)
-              except:
-                  pass
-          # Reconnect
-          tunnel = ngrok.connect(8000, bind_tls=True)
-          url = tunnel.public_url
-          print(f'New ngrok URL: {url}')
-          # Write to file and read back (shell variable update)
-          with open('/tmp/ngrok_url.txt', 'w') as f:
-              f.write(url)
-          "
-              sleep 3
-              # Read new URL if reconnected
-              if [ -f /tmp/ngrok_url.txt ]; then
-                NGROK_URL=$(cat /tmp/ngrok_url.txt)
+              # Kill old ngrok processes
+              pkill -f "/tmp/ngrok" 2>/dev/null || true
+              sleep 2
+              # Restart ngrok
+              /tmp/ngrok http 8000 --log=stdout --log-format=logfmt > /tmp/ngrok.log 2>&1 &
+              sleep 5
+              # Get new URL from ngrok API
+              NEW_URL=$(curl -sf http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              for t in data.get('tunnels', []):
+                  if t.get('public_url', '').startswith('https'):
+                      print(t['public_url'])
+                      break
+          except:
+              pass
+          " 2>/dev/null)
+              if [ -n "$NEW_URL" ]; then
+                NGROK_URL=$NEW_URL
                 echo "ngrok reconnected: $NGROK_URL"
+              else
+                echo "WARNING: ngrok reconnect failed"
               fi
             fi
 
