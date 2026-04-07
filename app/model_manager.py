@@ -131,11 +131,15 @@ class ModelManager:
         try:
             model_path.mkdir(parents=True, exist_ok=True)
 
+            # Set HF cache to /tmp on CI runners to avoid disk space issues
+            cache_dir = os.environ.get("HF_HOME", None)
+
             # Try to download as a diffusers pipeline
             snapshot_download(
                 repo_id=model_id,
                 local_dir=str(model_path),
                 local_dir_use_symlinks=False,
+                cache_dir=cache_dir,
             )
 
             registry_info = MODEL_REGISTRY.get(model_id, {})
@@ -149,11 +153,14 @@ class ModelManager:
                 import json
                 with open(model_index_path) as f:
                     idx = json.load(f)
-                    if "_class_name" in idx:
-                        if "StableVideoDiffusion" in idx["_class_name"]:
-                            model_type = "svd"
-                        elif "TextToVideo" in idx["_class_name"]:
-                            model_type = "text2video"
+                    class_name = idx.get("_class_name", "")
+                    if "StableVideoDiffusion" in class_name:
+                        model_type = "svd"
+                    elif "TextToVideo" in class_name:
+                        model_type = "text2video"
+                    else:
+                        model_type = "text2video"  # Default for unknown diffusers models
+                    logger.info(f"Detected model type: {model_type}")
 
             info = ModelInfo(
                 name=safe_name,
@@ -348,9 +355,21 @@ class ModelManager:
                 logger.warning("NSFW safety checker disabled")
 
             # Enable memory optimizations
-            pipeline.enable_model_cpu_offload()
             if device == "cuda":
+                pipeline.enable_model_cpu_offload()
                 pipeline.enable_vae_slicing()
+                if hasattr(pipeline, 'enable_xformers_memory_efficient_attention'):
+                    try:
+                        pipeline.enable_xformers_memory_efficient_attention()
+                    except ImportError:
+                        pass
+            else:
+                # CPU-specific optimizations
+                # Set attention slicing to reduce memory usage on CPU
+                pipeline.enable_attention_slicing("max")
+                if hasattr(pipeline, 'enable_vae_slicing'):
+                    pipeline.enable_vae_slicing()
+                logger.info("CPU optimizations enabled: attention_slicing, vae_slicing")
 
             self._loaded_pipeline = pipeline
             self._current_model_name = model_name

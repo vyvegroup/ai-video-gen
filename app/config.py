@@ -19,18 +19,32 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Model config
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "stabilityai/stable-video-diffusion-img2vid-xt")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "cerspense/zeroscope_v2_576w")
 ALLOW_NSFW = os.getenv("ALLOW_NSFW", "false").lower() == "true"
 DEVICE = os.getenv("DEVICE", "auto")  # auto, cuda, cpu, mps
 DTYPE = os.getenv("DTYPE", "auto")  # auto, fp16, bf16, fp32
 
-# Generation defaults
-DEFAULT_NUM_FRAMES = int(os.getenv("DEFAULT_NUM_FRAMES", "14"))
-DEFAULT_NUM_INFERENCE_STEPS = int(os.getenv("DEFAULT_NUM_INFERENCE_STEPS", "25"))
+# Detect if we're on a CPU-only environment (like GitHub Actions runner)
+def _is_cpu_only():
+    import torch
+    return not torch.cuda.is_available()
+
+_CPU_ONLY = _is_cpu_only() if 'torch' in dir() else os.getenv("DEVICE", "auto") == "cpu"
+
+# Generation defaults - CPU-optimized when no GPU
+if _CPU_ONLY:
+    DEFAULT_NUM_FRAMES = int(os.getenv("DEFAULT_NUM_FRAMES", "8"))
+    DEFAULT_NUM_INFERENCE_STEPS = int(os.getenv("DEFAULT_NUM_INFERENCE_STEPS", "15"))
+    DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "256"))
+    DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "256"))
+else:
+    DEFAULT_NUM_FRAMES = int(os.getenv("DEFAULT_NUM_FRAMES", "14"))
+    DEFAULT_NUM_INFERENCE_STEPS = int(os.getenv("DEFAULT_NUM_INFERENCE_STEPS", "25"))
+    DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
+    DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "576"))
+
 DEFAULT_FPS = int(os.getenv("DEFAULT_FPS", "6"))
 DEFAULT_SEED = int(os.getenv("DEFAULT_SEED", "-1"))  # -1 = random
-DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
-DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "576"))
 DEFAULT_MOTION_BUCKET_ID = int(os.getenv("DEFAULT_MOTION_BUCKET_ID", "127"))
 DEFAULT_NOISE_AUG_STRENGTH = float(os.getenv("DEFAULT_NOISE_AUG_STRENGTH", "0.02"))
 DEFAULT_CFG_SCALE = float(os.getenv("DEFAULT_CFG_SCALE", "3.0"))
@@ -41,9 +55,10 @@ MODEL_REGISTRY = {
         "type": "svd",
         "pipeline": "StableVideoDiffusionPipeline",
         "description": "Stable Video Diffusion - Image to Video (XT)",
-        "default_frames": 25,
+        "default_frames": 14,
         "max_frames": 25,
         "supports_text2video": False,
+        "cpu_note": "Very slow on CPU - use low resolution (256x256, 8 frames)",
     },
     "stabilityai/stable-video-diffusion-img2vid": {
         "type": "svd",
@@ -52,22 +67,33 @@ MODEL_REGISTRY = {
         "default_frames": 14,
         "max_frames": 14,
         "supports_text2video": False,
+        "cpu_note": "Slow on CPU - use low resolution",
     },
     "cerspense/zeroscope_v2_576w": {
         "type": "text2video",
         "pipeline": "TextToVideoSDPipeline",
-        "description": "Zeroscope V2 - Text to Video",
-        "default_frames": 24,
-        "max_frames": 60,
+        "description": "Zeroscope V2 - Text to Video (CPU-friendly)",
+        "default_frames": 8,
+        "max_frames": 24,
         "supports_text2video": True,
+        "recommended": True,
     },
     "cerspense/zeroscope_v2_XL": {
         "type": "text2video",
         "pipeline": "TextToVideoSDPipeline",
         "description": "Zeroscope V2 XL - Text to Video (Higher Quality)",
-        "default_frames": 24,
-        "max_frames": 60,
+        "default_frames": 8,
+        "max_frames": 24,
         "supports_text2video": True,
+    },
+    "damo-vilab/text-to-video-ms-1.7b": {
+        "type": "text2video",
+        "pipeline": "TextToVideoSDPipeline",
+        "description": "ModelScope Text-to-Video (1.7B - smaller, faster on CPU)",
+        "default_frames": 8,
+        "max_frames": 16,
+        "supports_text2video": True,
+        "recommended": True,
     },
 }
 

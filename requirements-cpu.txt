@@ -1,0 +1,18 @@
+# AI Video Generation App - CPU-only Dependencies
+# For GitHub-hosted runners (no GPU)
+# PyTorch CPU is installed separately via: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+diffusers>=0.25.0
+transformers>=4.37.0
+accelerate>=0.26.0
+safetensors>=0.4.0
+huggingface_hub>=0.20.0
+Pillow>=10.0.0
+numpy>=1.24.0
+requests>=2.31.0
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+pyngrok>=7.1.0
+aiofiles>=23.2.1
+opencv-python-headless>=4.9.0
