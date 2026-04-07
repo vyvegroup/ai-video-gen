@@ -174,35 +174,84 @@ jobs:
         run: |
           set +e
 
-          # Install ngrok
-          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
-          mv ngrok /usr/local/bin/ 2>/dev/null || true
+          # Install ngrok via snap (most reliable on Ubuntu)
+          which ngrok > /dev/null 2>&1 || {
+            echo "Installing ngrok..."
+            sudo snap install ngrok 2>/dev/null || {
+              # Fallback: download binary
+              curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz -C /tmp
+              export PATH="/tmp:$PATH"
+              chmod +x /tmp/ngrok
+            }
+          }
 
-          # Configure & start
-          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
+          # Verify ngrok is available
+          which ngrok
+          ngrok version
+
+          # Verify server is listening
+          curl -s http://localhost:8000/api/system/health > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "ERROR: Server not listening on port 8000!"
+            exit 1
+          fi
+          echo "Server confirmed on port 8000"
+
+          # Configure ngrok
+          ngrok config add-authtoken "$NGROK_AUTH_TOKEN" 2>&1
+
+          # Start ngrok
+          echo "Starting ngrok http 8000..."
           ngrok http 8000 --log=stdout --log-format=logfmt > ngrok.log 2>&1 &
+          NGROK_PID=$!
+          echo "ngrok PID: $NGROK_PID"
 
-          # Wait for tunnel (up to 60 seconds)
-          echo "Waiting for ngrok tunnel..."
+          # Wait 5 seconds for ngrok to initialize
+          sleep 5
+
+          # Verify ngrok process is running
+          if ! kill -0 $NGROK_PID 2>/dev/null; then
+            echo "ERROR: ngrok process died immediately!"
+            echo "=== ngrok log ==="
+            cat ngrok.log
+            exit 1
+          fi
+          echo "ngrok process is running"
+
+          # Wait for tunnel
+          echo "Waiting for tunnel URL..."
           TUNNEL=""
           for i in $(seq 1 30); do
-            sleep 2
             TUNNEL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null)
             if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then
+              echo "GOT IT: $TUNNEL"
               break
             fi
             TUNNEL=""
-            echo "  retry $i/30..."
+
+            # Check ngrok still alive
+            if ! kill -0 $NGROK_PID 2>/dev/null; then
+              echo "ngrok died at iteration $i"
+              cat ngrok.log
+              exit 1
+            fi
+
+            echo "  waiting... ($i/30)"
+            sleep 2
           done
 
+          set -e
+
           if [ -z "$TUNNEL" ]; then
-            echo "=== NGROK FAILED ==="
+            echo "=== NGROK TUNNEL FAILED ==="
+            echo "=== ngrok.log ==="
             cat ngrok.log
-            ps aux | grep ngrok
+            echo "=== processes ==="
+            ps aux | grep ngrok || true
+            echo "=== port check ==="
+            ss -tlnp | grep -E '8000|4040' || true
             exit 1
           fi
-
-          set -e
 
           echo "PUBLIC_URL=$TUNNEL" >> $GITHUB_ENV
           echo "TUNNEL_URL=$TUNNEL" >> $GITHUB_ENV
